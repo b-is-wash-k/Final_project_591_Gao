@@ -9,6 +9,14 @@ A Gazebo Harmonic + ROS 2 Jazzy simulation of a two-room escape maze for multi-r
 
 ![Maze overview: two rooms, lift gate, red and blue switches, exit](docs/maze_overview.png)
 
+## Demo
+
+![Demo: robots moved onto the colored switches; gate D1 opens and closes](docs/gate_demo.gif)
+
+▶ [Full video (MP4, 41 s)](docs/gate_demo.mp4)
+
+The robots are moved onto the switches with Gazebo's move tool. When a robot stands on a switch of its own color, the switch manager lifts gate D1. When no matching robot holds a switch, the gate closes.
+
 ## What is included
 
 - **Maze world:** `worlds/escape_maze.sdf`
@@ -39,7 +47,9 @@ The scripts use the system Python (`/usr/bin/python3`), which has the Gazebo Pyt
 ├── config/
 │   └── scenario.yaml          # robots, switches, door rules, exit
 ├── docs/
-│   └── maze_overview.png      # screenshot of the maze
+│   ├── maze_overview.png      # screenshot of the maze
+│   ├── gate_demo.gif          # demo animation (plays in this README)
+│   └── gate_demo.mp4          # full demo video
 ├── scripts/
 │   ├── run.sh                 # start everything with one command
 │   ├── switch_manager.py      # switch and door logic (+ --selftest)
