@@ -56,6 +56,7 @@ The scripts use the system Python (`/usr/bin/python3`), which has the Gazebo Pyt
 │   └── test_helpers.sh        # test_a, test_b, setpose, drive_red, drive_blue
 ├── worlds/
 │   └── escape_maze.sdf        # the Gazebo world
+├── CONTRIBUTING.md            # team Git workflow
 └── README.md
 ```
 
@@ -236,3 +237,7 @@ If you move a switch or the exit in the scenario, move its marker in `worlds/esc
 | Robots appear without meshes | Run the `export GZ_SIM_RESOURCE_PATH=...` line before `gz sim` |
 | `setpose: command not found` | Run `source scripts/test_helpers.sh` in that terminal first |
 | A robot on a switch does nothing | Check the colors: red presses only `S_R` (−1.1, −1.45); blue presses only `S_B` (1.1, 1.45) |
+
+## Contributing
+
+Team members: see [CONTRIBUTING.md](CONTRIBUTING.md) for the branch and Pull Request workflow.
