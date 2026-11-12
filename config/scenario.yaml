@@ -1,0 +1,55 @@
+# Escape-maze scenario: two robots, two hold switches, one gate.
+#   gz_world_name:   the <world name> in the SDF (used to read robot poses from Gazebo)
+#   on_pad_radius_m: a robot is ON a switch when its center is within this distance of the pad center
+#   Robot ids must match the model names used when spawning (robot_name:=robot_red, ...).
+scenario:
+  id: escape_maze_hold_handoff
+  world: ../worlds/escape_maze.sdf
+  gz_world_name: escape_maze
+  on_pad_radius_m: 0.30
+  description: Two-room maze with a hold-switch handoff across one gate.
+
+mission:
+  goal: all_robots_reach_exit
+
+robots:
+  - id: robot_red
+    color: red
+    skills: [navigate, activate_red_switch]
+    start_pose: [-4.8, -0.65, 0.0]
+  - id: robot_blue
+    color: blue
+    skills: [navigate, activate_blue_switch]
+    start_pose: [-4.8, 0.65, 0.0]
+
+switches:
+  - id: S_R
+    color: red
+    mode: hold
+    pose: [-1.1, -1.45, 0.0]
+  - id: S_B
+    color: blue
+    mode: hold
+    pose: [1.1, 1.45, 0.0]
+
+doors:
+  - id: D1
+    type: vertical_sliding_gate
+    logic: any_of
+    requires: [S_R, S_B]
+    open_while_requirement_true: true
+    closed_joint_position_m: 0.0
+    open_joint_position_m: 1.3
+
+exit:
+  id: EXIT
+  pose: [5.1, 0.0, 0.0]
+
+initial_robot_knowledge:
+  robot_colors_known: true
+  switch_modes_known: true
+  maze_layout_known: false
+  object_locations_known: false
+  switch_door_mapping_known: false
+  reveal_locations_on_observation: true
+  reveal_switch_door_mapping_on_observation: true
