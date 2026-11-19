@@ -13,21 +13,25 @@ mission:
   goal: all_robots_reach_exit
 
 robots:
-  - id: robot_red
-    color: red
-    skills: [navigate, activate_red_switch]
+  # - id: robot_red
+  - id: robot1
+    colors: [red]
+    # skills: [navigate, activate_red_switch]
     start_pose: [-4.8, -0.65, 0.0]
-  - id: robot_blue
-    color: blue
-    skills: [navigate, activate_blue_switch]
+  # - id: robot_blue
+  - id: robot2
+    colors: [blue]
+    # skills: [navigate, activate_blue_switch]
     start_pose: [-4.8, 0.65, 0.0]
 
 switches:
-  - id: S_R
+  # - id: S_R
+  - id: S1
     color: red
     mode: hold
     pose: [-1.1, -1.45, 0.0]
-  - id: S_B
+  # - id: S_B
+  - id: S2
     color: blue
     mode: hold
     pose: [1.1, 1.45, 0.0]
@@ -36,7 +40,8 @@ doors:
   - id: D1
     type: vertical_sliding_gate
     logic: any_of
-    requires: [S_R, S_B]
+    # requires: [S_R, S_B]
+    requires: [S1, S2]
     open_while_requirement_true: true
     closed_joint_position_m: 0.0
     open_joint_position_m: 1.3

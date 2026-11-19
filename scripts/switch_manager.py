@@ -27,7 +27,7 @@ def robot_on_pad(robot_xy, switch, radius):
 
     robot_xy: (x, y) of the robot in meters, world frame.
     switch:   one entry of `switches` in the scenario, e.g.
-              {"id": "S_R", "color": "red", "mode": "hold", "pose": [-1.1, -1.45, 0.0]}
+              {"id": "S1", "color": "red", "mode": "hold", "pose": [-1.1, -1.45, 0.0]}
     radius:   on_pad_radius_m from the scenario.
     Rule: distance from robot center to pad center <= radius.
     """
@@ -61,8 +61,8 @@ def switch_is_on(switch, was_on, colors_on_pad):
 def door_should_open(door, switch_on):
     """True if this door should be open.
 
-    door:      one entry of `doors`, e.g. {"id": "D1", "logic": "any_of", "requires": ["S_R", "S_B"], ...}
-    switch_on: dict switch id -> True/False, e.g. {"S_R": True, "S_B": False}
+    door:      one entry of `doors`, e.g. {"id": "D1", "logic": "any_of", "requires": ["S1", "S2"], ...}
+    switch_on: dict switch id -> True/False, e.g. {"S1": True, "S2": False}
     Rules: any_of = at least one required switch ON; all_of = every required switch ON.
     """
     required_states = [switch_on[sid] for sid in door["requires"]]
@@ -78,10 +78,13 @@ def door_should_open(door, switch_on):
 # ------------------------------------------------------- self-test (no Gazebo) --
 
 def selftest():
-    red_hold = {"id": "S_R", "color": "red", "mode": "hold", "pose": [-1.1, -1.45, 0.0]}
+    # old: red_hold = {"id": "S_R", "color": "red", "mode": "hold", "pose": [-1.1, -1.45, 0.0]}
+    red_hold = {"id": "S1", "color": "red", "mode": "hold", "pose": [-1.1, -1.45, 0.0]}
     red_latch = {"id": "S_L", "color": "red", "mode": "latch", "pose": [0.0, 0.0, 0.0]}
-    any_door = {"id": "D1", "logic": "any_of", "requires": ["S_R", "S_B"]}
-    all_door = {"id": "D2", "logic": "all_of", "requires": ["S_R", "S_B"]}
+    # old: any_door = {"id": "D1", "logic": "any_of", "requires": ["S_R", "S_B"]}
+    any_door = {"id": "D1", "logic": "any_of", "requires": ["S1", "S2"]}
+    # old: all_door = {"id": "D2", "logic": "all_of", "requires": ["S_R", "S_B"]}
+    all_door = {"id": "D2", "logic": "all_of", "requires": ["S1", "S2"]}
     cases = [
         ("on pad center",              robot_on_pad((-1.1, -1.45), red_hold, 0.30), True),
         ("0.25 m away (inside)",       robot_on_pad((-0.85, -1.45), red_hold, 0.30), True),
@@ -92,10 +95,14 @@ def selftest():
         ("latch: first red press",     switch_is_on(red_latch, False, {"red"}), True),
         ("latch: stays on after",      switch_is_on(red_latch, True, set()), True),
         ("latch: blue can't press it", switch_is_on(red_latch, False, {"blue"}), False),
-        ("any_of: one on",             door_should_open(any_door, {"S_R": True, "S_B": False}), True),
-        ("any_of: none on",            door_should_open(any_door, {"S_R": False, "S_B": False}), False),
-        ("all_of: one on",             door_should_open(all_door, {"S_R": True, "S_B": False}), False),
-        ("all_of: both on",            door_should_open(all_door, {"S_R": True, "S_B": True}), True),
+        # old: ("any_of: one on",             door_should_open(any_door, {"S_R": True, "S_B": False}), True),
+        ("any_of: one on",             door_should_open(any_door, {"S1": True, "S2": False}), True),
+        # old: ("any_of: none on",            door_should_open(any_door, {"S_R": False, "S_B": False}), False),
+        ("any_of: none on",            door_should_open(any_door, {"S1": False, "S2": False}), False),
+        # old: ("all_of: one on",             door_should_open(all_door, {"S_R": True, "S_B": False}), False),
+        ("all_of: one on",             door_should_open(all_door, {"S1": True, "S2": False}), False),
+        # old: ("all_of: both on",            door_should_open(all_door, {"S_R": True, "S_B": True}), True),
+        ("all_of: both on",            door_should_open(all_door, {"S1": True, "S2": True}), True),
     ]
     bad = 0
     for name, got, want in cases:
@@ -145,8 +152,10 @@ def run(scenario_path):
             continue
 
         for sid, sw in switches.items():
-            colors = {robots[rid]["color"] for rid, xy in poses.items()
-                      if robot_on_pad(xy, sw, radius)}
+            # colors = {robots[rid]["color"] for rid, xy in poses.items()
+            #           if robot_on_pad(xy, sw, radius)}
+            colors = {c for rid, xy in poses.items()
+                      if robot_on_pad(xy, sw, radius) for c in robots[rid]["colors"]}
             new = switch_is_on(sw, switch_on[sid], colors)
             if new != switch_on[sid]:
                 log(f"switch {sid} ({sw['color']} {sw['mode']}) -> {'ON' if new else 'OFF'}")
