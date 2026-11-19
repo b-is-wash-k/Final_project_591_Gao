@@ -138,11 +138,13 @@
       <static>true</static><pose>-4.8 0.65 0.01 0 0 0</pose>
       <link name="link"><visual name="visual"><geometry><cylinder><radius>0.32</radius><length>0.02</length></cylinder></geometry><material><ambient>0.10 0.22 0.85 1</ambient><diffuse>0.16 0.32 0.98 1</diffuse></material></visual></link>
     </model>
-    <model name="switch_S_R">
+    <!-- old: <model name="switch_S_R"> -->
+    <model name="switch_S1">
       <static>true</static><pose>-1.1 -1.45 0.02 0 0 0</pose>
       <link name="link"><visual name="visual"><geometry><cylinder><radius>0.30</radius><length>0.04</length></cylinder></geometry><material><ambient>0.75 0.06 0.06 1</ambient><diffuse>0.95 0.10 0.10 1</diffuse></material></visual></link>
     </model>
-    <model name="switch_S_B">
+    <!-- old: <model name="switch_S_B"> -->
+    <model name="switch_S2">
       <static>true</static><pose>1.1 1.45 0.02 0 0 0</pose>
       <link name="link"><visual name="visual"><geometry><cylinder><radius>0.30</radius><length>0.04</length></cylinder></geometry><material><ambient>0.06 0.15 0.75 1</ambient><diffuse>0.10 0.25 0.95 1</diffuse></material></visual></link>
     </model>

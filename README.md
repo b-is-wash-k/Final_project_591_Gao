@@ -64,11 +64,11 @@ The scripts use the system Python (`/usr/bin/python3`), which has the Gazebo Pyt
 
 | Element | Position (x, y) in m | Details |
 |---|---|---|
-| Red robot `robot_red` | (−4.8, −0.65) | Start room |
-| Blue robot `robot_blue` | (−4.8, 0.65) | Start room |
-| Switch `S_R` | (−1.1, −1.45) | Red, **hold**, start room next to the gate |
-| Switch `S_B` | (1.1, 1.45) | Blue, **hold**, far room next to the gate |
-| Gate `D1` | (0, 0) | Opens if `S_R` **or** `S_B` is ON (`any_of`) |
+| Red robot `robot1` | (−4.8, −0.65) | Start room |
+| Blue robot `robot2` | (−4.8, 0.65) | Start room |
+| Switch `S1` | (−1.1, −1.45) | Red, **hold**, start room next to the gate |
+| Switch `S2` | (1.1, 1.45) | Blue, **hold**, far room next to the gate |
+| Gate `D1` | (0, 0) | Opens if `S1` **or** `S2` is ON (`any_of`) |
 | Exit | (5.1, 0) | Far room |
 
 The rooms are 12 m × 5 m inside, split by a wall with a 1.6 m doorway that holds the gate.
@@ -85,9 +85,9 @@ The rooms are 12 m × 5 m inside, split by a wall with a 1.6 m doorway that hold
 | `all_of` door | Open when every listed switch is ON |
 
 The intended solution is a handoff:
-1. Red holds `S_R`, so the gate opens.
-2. Blue crosses and holds `S_B`.
-3. Red leaves `S_R` and crosses. The gate stays open because blue holds `S_B`.
+1. Red holds `S1`, so the gate opens.
+2. Blue crosses and holds `S2`.
+3. Red leaves `S1` and crosses. The gate stays open because blue holds `S2`.
 4. Both robots go to the exit.
 
 ## How it works
@@ -123,6 +123,12 @@ cd escape_maze_gazebo                 # the repository root
 
 Each run's logs are saved in `logs/run_<date>_<time>/`.
 
+The launcher and test helpers default to `GZ_IP=127.0.0.1` so Gazebo's GUI,
+server and robot processes can discover each other on this computer. This avoids
+startup hangs with automatic network-interface selection. If you use multiple
+computers, set `GZ_IP` to this computer's reachable network address in every
+terminal instead.
+
 **Terminal B: run the tests.** Use `source`, not `./`.
 
 ```bash
@@ -146,8 +152,8 @@ python3 scripts/switch_manager.py --selftest     # ends with: ALL PASS (13 check
 
 | Step | Terminal A prints | Gate |
 |---|---|---|
-| Red robot onto the red switch `S_R` | `switch S_R (red hold) -> ON`, then `door D1 -> OPEN` | Rises |
-| Red robot steps off | `switch S_R (red hold) -> OFF`, then `door D1 -> CLOSED` | Drops |
+| Red robot onto the red switch `S1` | `switch S1 (red hold) -> ON`, then `door D1 -> OPEN` | Rises |
+| Red robot steps off | `switch S1 (red hold) -> OFF`, then `door D1 -> CLOSED` | Drops |
 | Blue robot onto the **red** switch | Nothing (wrong color) | Stays closed |
 | Blue robot back to start | Nothing | Stays closed |
 
@@ -155,20 +161,20 @@ python3 scripts/switch_manager.py --selftest     # ends with: ALL PASS (13 check
 
 | Step | Terminal A prints | Gate |
 |---|---|---|
-| Red holds `S_R` | `switch S_R (red hold) -> ON`, then `door D1 -> OPEN` | Rises |
-| Blue holds `S_B` on the far side | `switch S_B (blue hold) -> ON` | Stays open |
-| Red leaves `S_R` and crosses | `switch S_R (red hold) -> OFF` | **Stays open** (blue holds `S_B`) |
-| Blue leaves `S_B` | `switch S_B (blue hold) -> OFF`, then `door D1 -> CLOSED` | Drops |
+| Red holds `S1` | `switch S1 (red hold) -> ON`, then `door D1 -> OPEN` | Rises |
+| Blue holds `S2` on the far side | `switch S2 (blue hold) -> ON` | Stays open |
+| Red leaves `S1` and crosses | `switch S1 (red hold) -> OFF` | **Stays open** (blue holds `S2`) |
+| Blue leaves `S2` | `switch S2 (blue hold) -> OFF`, then `door D1 -> CLOSED` | Drops |
 
 Expected output in Terminal A for Test B (times will differ):
 
 ```
-[   0.00s] switch manager up; world=escape_maze; watching robots ['robot_red', 'robot_blue']
-[   7.02s] switch S_R (red hold) -> ON
+[   0.00s] switch manager up; world=escape_maze; watching robots ['robot1', 'robot2']
+[   7.02s] switch S1 (red hold) -> ON
 [   7.02s] door D1 -> OPEN
-[  10.73s] switch S_B (blue hold) -> ON
-[  14.24s] switch S_R (red hold) -> OFF
-[  17.64s] switch S_B (blue hold) -> OFF
+[  10.73s] switch S2 (blue hold) -> ON
+[  14.24s] switch S1 (red hold) -> OFF
+[  17.64s] switch S2 (blue hold) -> OFF
 [  17.64s] door D1 -> CLOSED
 ```
 
@@ -176,12 +182,12 @@ Expected output in Terminal A for Test B (times will differ):
 
 ```bash
 reset_robots                      # both robots back to their start positions
-setpose robot_red -1.1 -1.45      # teleport one robot to (x, y)
+setpose robot1 -1.1 -1.45      # teleport one robot to (x, y)
 drive_red                         # drive the red robot with the keyboard (Ctrl+C to stop)
 drive_blue                        # drive the blue robot
 ```
 
-`setpose` teleports a robot, which is useful for testing the switch logic. To show a real crossing, open the gate (red on `S_R`) and drive blue through it with `drive_blue`.
+`setpose` teleports a robot, which is useful for testing the switch logic. To show a real crossing, open the gate (red on `S1`) and drive blue through it with `drive_blue`.
 
 ## Running each part manually
 
@@ -190,18 +196,22 @@ The same as `run.sh`, one terminal per part. Run every terminal from the reposit
 ```bash
 # Terminal 1: Gazebo. Run the export before gz sim, or the robot meshes won't load.
 source /opt/ros/jazzy/setup.bash
+export GZ_IP=127.0.0.1              # set this in all four terminals
 export GZ_SIM_RESOURCE_PATH=/opt/ros/jazzy/share/nav2_minimal_tb3_sim/models:/opt/ros/jazzy/share
 gz sim -r worlds/escape_maze.sdf
 
 # Terminal 2: red robot. robot_name must match the robot id in config/scenario.yaml.
 source /opt/ros/jazzy/setup.bash
-ros2 launch nav2_minimal_tb3_sim spawn_tb3.launch.py namespace:=robot_red robot_name:=robot_red x_pose:=-4.8 y_pose:=-0.65
+export GZ_IP=127.0.0.1
+ros2 launch nav2_minimal_tb3_sim spawn_tb3.launch.py namespace:=robot1 robot_name:=robot1 x_pose:=-4.8 y_pose:=-0.65
 
 # Terminal 3: blue robot
 source /opt/ros/jazzy/setup.bash
-ros2 launch nav2_minimal_tb3_sim spawn_tb3.launch.py namespace:=robot_blue robot_name:=robot_blue x_pose:=-4.8 y_pose:=0.65
+export GZ_IP=127.0.0.1
+ros2 launch nav2_minimal_tb3_sim spawn_tb3.launch.py namespace:=robot2 robot_name:=robot2 x_pose:=-4.8 y_pose:=0.65
 
 # Terminal 4: switch manager
+export GZ_IP=127.0.0.1
 python3 scripts/switch_manager.py config/scenario.yaml
 ```
 
@@ -230,13 +240,15 @@ If you move a switch or the exit in the scenario, move its marker in `worlds/esc
 
 | Symptom | Fix |
 |---|---|
+| Gazebo hangs at startup; logs show `Waited for 10s for a subscriber to [/gazebo/starting_world]` | Use the updated `run.sh`, or run `export GZ_IP=127.0.0.1` before `gz sim`. Use the same value in terminals running robot spawners, the manager and test commands |
+| `Errno::ESRCH` / `No such process` after repeated Ctrl+C | This can happen in Gazebo's shutdown handler when a process is already gone. Press Ctrl+C once and allow shutdown to finish; check earlier log messages for the startup failure |
 | Terminal A shows nothing after `switch manager up` | Normal. It prints only when a switch or door changes; move a robot onto a switch |
 | `waiting for robot poses: [...]` keeps printing | The spawn `robot_name` must match the robot `id` in the scenario, and `gz_world_name` must match `<world name>` in the SDF |
 | `a Gazebo world named 'escape_maze' is already running` | Close the other Gazebo first (or `pkill -f 'gz sim'`) |
 | `ModuleNotFoundError: No module named 'gz'` | Use the system `python3` (`/usr/bin/python3`), not a conda or venv Python |
 | Robots appear without meshes | Run the `export GZ_SIM_RESOURCE_PATH=...` line before `gz sim` |
 | `setpose: command not found` | Run `source scripts/test_helpers.sh` in that terminal first |
-| A robot on a switch does nothing | Check the colors: red presses only `S_R` (−1.1, −1.45); blue presses only `S_B` (1.1, 1.45) |
+| A robot on a switch does nothing | Check the colors: red presses only `S1` (−1.1, −1.45); blue presses only `S2` (1.1, 1.45) |
 
 ## Contributing
 

@@ -32,9 +32,14 @@ GZ_ARGS=(-r)
 say() { echo "[run] $*"; }
 
 source /opt/ros/jazzy/setup.bash
+# Keep discovery on this computer; automatic interface selection can leave the
+# GUI and server waiting for each other on machines with VPN/virtual interfaces.
+# An explicit GZ_IP still takes precedence for multi-computer setups.
+export GZ_IP=${GZ_IP:-127.0.0.1}
 export GZ_SIM_RESOURCE_PATH=/opt/ros/jazzy/share/nav2_minimal_tb3_sim/models:/opt/ros/jazzy/share${GZ_SIM_RESOURCE_PATH:+:$GZ_SIM_RESOURCE_PATH}
 
-# Each background program gets its own process group, so Ctrl+C can stop it and all its children.
+# Each background program gets its own session. Gazebo creates separate process
+# groups for its GUI and server, so cleanup must stop the whole session.
 PIDS=()
 start_bg() {   # start_bg <logfile> <command...>
   local log=$1; shift
@@ -42,14 +47,29 @@ start_bg() {   # start_bg <logfile> <command...>
   PIDS+=($!)
 }
 cleanup() {
-  trap - INT TERM EXIT
+  local status=$?
+  trap - EXIT
+  trap '' INT TERM   # let cleanup finish even if Ctrl+C is pressed again
   echo
   say "stopping Gazebo, robots and switch manager..."
-  for pid in "${PIDS[@]}"; do kill -INT -- "-$pid" 2>/dev/null; done
-  sleep 2
-  for pid in "${PIDS[@]}"; do kill -KILL -- "-$pid" 2>/dev/null; done
+  # SIGTERM also stops shell/Python jobs that inherited ignored SIGINT when
+  # started in the background. Gazebo and ROS launch handle it for shutdown.
+  for pid in "${PIDS[@]}"; do pkill -TERM -s "$pid" 2>/dev/null; done
+  # Allow the Gazebo wrapper's GUI/server shutdown timeouts to finish before
+  # forcing any remaining processes to exit. A second Ctrl+C cannot skip this.
+  local deadline=$((SECONDS + 12)) running
+  while ((SECONDS < deadline)); do
+    running=0
+    for pid in "${PIDS[@]}"; do
+      if pgrep -s "$pid" >/dev/null; then running=1; break; fi
+    done
+    ((running)) || break
+    sleep 0.1
+  done
+  for pid in "${PIDS[@]}"; do pkill -KILL -s "$pid" 2>/dev/null; done
+  for pid in "${PIDS[@]}"; do wait "$pid" 2>/dev/null; done
   say "stopped. Logs are in $LOG_DIR"
-  exit 0
+  exit "$status"
 }
 trap cleanup INT TERM EXIT
 
@@ -85,7 +105,8 @@ for line in "${ROBOT_LINES[@]}"; do ROBOTS+=("${line%% *}"); done
 
 # 1. Gazebo
 say "Gazebo  ($WORLD_FILE ${GZ_ARGS[*]})"
-start_bg "$LOG_DIR/gazebo.log" gz sim "${GZ_ARGS[@]}" "$WORLD_FILE"
+say "GZ_IP=$GZ_IP; logs: $LOG_DIR"
+start_bg "$LOG_DIR/gazebo.log" gz sim -v 3 "${GZ_ARGS[@]}" "$WORLD_FILE"
 wait_for 60 "Gazebo to load the world" world_up
 
 # 2. One TurtleBot3 per robot in the scenario
