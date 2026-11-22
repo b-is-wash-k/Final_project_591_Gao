@@ -1,0 +1,33 @@
+{
+  "rooms": [
+    {
+      "id": "1,1",
+      "robots": ["robot1", "robot2"],
+      "switches": ["S1"],
+      "doors": [{"id": "D1", "other_room": "UNKNOWN"}],
+      "exit": false
+    }
+  ],
+  "robots": [
+    {"id": "robot1", "colors": ["red"],
+     "status": {"type": "ok", "repair_time": null, "waiting_for": null}, "task": null},
+    {"id": "robot2", "colors": ["blue"],
+     "status": {"type": "ok", "repair_time": null, "waiting_for": null}, "task": null}
+  ],
+  "switches": [
+    {"id": "S1", "color": "red", "mode": "hold", "active": false, "controls": "D1"}
+  ],
+  "doors": [
+    {"id": "D1", "open": false, "open_if": {"any_of": ["S1", "S2"]}}
+  ],
+  "tasks": [
+    {"id": "HOLD:S1", "type": "HOLD", "target": "S1", "needs_color": "red",
+     "enables": "CROSS:D1", "depends": null},
+    {"id": "CROSS:D1", "type": "CROSS", "target": "D1", "needs_color": null,
+     "enables": null, "depends": ["HOLD:S1"]}
+  ],
+  "costs": {
+    "robot1": {"HOLD:S1": 2.0, "CROSS:D1": 5.0},
+    "robot2": {"HOLD:S1": 3.0, "CROSS:D1": 4.0}
+  }
+}
