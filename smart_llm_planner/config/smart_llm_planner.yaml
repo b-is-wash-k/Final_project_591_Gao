@@ -1,0 +1,13 @@
+smart_llm_planner:
+  ros__parameters:
+    model: gemini-2.5-flash
+    # Prefer:  export GEMINI_API_KEY=<your key>   (the environment variable wins over this value).
+    # Do not commit a real key.
+    api_key: YOUR_GEMINI_API_KEY_HERE
+    temperature: 0.0
+    request_timeout_s: 60.0
+    instruction: All robots must reach the exit.
+    replan_period_s: 20.0          # safety-net replan if nothing has triggered one
+    world_state_topic: /team/world_state
+    plan_topic: /team/plan
+    log_topic: /team/planner_log
