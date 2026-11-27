@@ -9,17 +9,19 @@ Start it after Gazebo and the robots are up (scripts/run.sh --nav does this). Fo
     that starts them. The robot then accepts goals on /<robot>/navigate_to_pose.
 
 Each robot has its own TF tree on /<robot>/tf and /<robot>/tf_static. The Gazebo bridge started
-by spawn_tb3.launch.py already provides /<robot>/odom, /<robot>/scan, /<robot>/tf (odom ->
+by launch/spawn_robot.launch.py already provides /<robot>/odom, /<robot>/scan, /<robot>/tf (odom ->
 base_footprint), /<robot>/joint_states and /<robot>/cmd_vel.
 """
 import math
+import shutil
 import tempfile
 from pathlib import Path
 
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, RegisterEventHandler
+from launch.event_handlers import OnShutdown
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -50,11 +52,20 @@ def setup(context):
 
     sim = Path(get_package_share_directory("nav2_minimal_tb3_sim"))
     urdf = (sim / "urdf" / "turtlebot3_waffle.urdf").read_text()
-    out_dir = Path(tempfile.mkdtemp(prefix="escape_maze_nav2_"))
     remaps = [("/tf", "tf"), ("/tf_static", "tf_static")]
     sim_time = {"use_sim_time": True}
 
     actions = []
+    # The per-robot parameter files go to params_dir (run.sh: the run's log folder), or to a
+    # temporary folder that is removed again when the launch shuts down.
+    params_dir = LaunchConfiguration("params_dir").perform(context)
+    if params_dir:
+        out_dir = Path(params_dir).resolve()
+        out_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        out_dir = Path(tempfile.mkdtemp(prefix="escape_maze_nav2_"))
+        actions.append(RegisterEventHandler(OnShutdown(
+            on_shutdown=[OpaqueFunction(function=lambda _: shutil.rmtree(out_dir, ignore_errors=True))])))
     for robot in sc["robots"]:
         rid = robot["id"]
         x, y, yaw = (list(robot["start_pose"]) + [0.0, 0.0, 0.0])[:3]
@@ -86,5 +97,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("scenario", default_value=str(HERE.parent / "config" / "scenario.yaml")),
         DeclareLaunchArgument("params_file", default_value=str(HERE.parent / "config" / "nav2_params.yaml")),
+        DeclareLaunchArgument("params_dir", default_value="",
+                              description="where to write the per-robot parameter files (default: a "
+                                          "temporary folder, removed on shutdown)"),
         OpaqueFunction(function=setup),
     ])

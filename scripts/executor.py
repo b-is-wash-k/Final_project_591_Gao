@@ -3,6 +3,7 @@
 
     /team/plan (from ANY planner)  ->  executor  ->  /<robot>/navigate_to_pose (Nav2)
     /team/world_state              ->  executor  ->  /team/robot_status -> switch manager -> world state
+                                       executor  ->  /team/mission (mission start / complete, for experiments)
 
 Input: the planner output of docs/communication_standards.md, a std_msgs/String with JSON
 like {"robot1": "HOLD:S1", "robot2": "CROSS:D1"}. Every planner (the baseline planner, the
@@ -16,9 +17,15 @@ What each task means for a robot:
                 This also works for a door whose other side is still UNKNOWN (exploring).
   EXIT          drive to a free spot next to the exit; done when there.
   WAIT          stop and do nothing.
-A task id that is re-sent keeps the current goal. A finished task that is re-sent is ignored.
 When a task is done, the robot's "task" goes back to null in /team/robot_status (and so in the
-world state), which tells the planners to replan.
+world state), which tells the planners to replan. A task that is re-sent keeps the current goal.
+A finished task that is re-sent is ignored until the world state shows it finished (the planner
+may not have seen that yet); after that it is a new request (CROSS again = cross back). EXIT is
+also ignored while the robot is still parked at the exit. After MAX_NAV_FAILURES Nav2 failures
+in a row a task is given up: its task goes back to null, so the planner replans.
+
+Safety interlock, whatever the planner says: a robot holding a switch stays on it while another
+robot is in the opening of a door that would close without that switch.
 
 The executor drives the real robot, so it may use the true geometry in config/scenario.yaml
 (where a door is and which rooms it joins). The planners only ever see the world state.
@@ -39,7 +46,7 @@ from world_state import room_of
 ROBOT_STATUS_TOPIC = "/team/robot_status"
 PLAN_TOPIC = "/team/plan"
 WORLD_STATE_TOPIC = "/team/world_state"
-TASK_TYPES = ("ACTIVATE", "HOLD", "CROSS", "EXIT")
+MISSION_TOPIC = "/team/mission"
 
 CROSS_BEYOND_M = 0.9      # CROSS goal: this far past the door center, inside the far room
 CROSS_STAGING_M = 0.9     # waiting spot: this far in front of a closed door
@@ -49,8 +56,10 @@ DOORWAY_HALF_WIDTH_M = 1.0  # a robot this close to a door center, along the wal
 WALL_MARGIN_M = 0.4       # goals stay at least this far from a room's walls
 EXIT_SLOT_RADIUS_M = 0.6  # robots park on a circle of this radius around the exit
 EXIT_SLOT_SPACING_M = 0.6 # minimum distance between two parked robots
+EXIT_STAY_M = 0.5         # a finished EXIT re-sent while the robot is this close to its spot is ignored
 REACHED_M = 0.25          # "at the goal" when this close (Nav2's goal tolerance is 0.12 m)
 ACTIVATE_GIVE_UP_S = 5.0  # ACTIVATE ends this long after reaching the pad even if the switch stays off
+MAX_NAV_FAILURES = 3      # Nav2 failures in a row before a task is given up
 STEP_HZ = 5
 STATUS_PERIOD_S = 1.0     # /team/robot_status is re-sent at least this often
 
@@ -125,8 +134,9 @@ def cross_plan(door, robot_xy, sc):
     elif here == a:
         near, far = a, b
     else:
-        center = lambda rid: ((room_by_id(sc, rid)["bounds"][0] + room_by_id(sc, rid)["bounds"][2]) / 2,
-                              (room_by_id(sc, rid)["bounds"][1] + room_by_id(sc, rid)["bounds"][3]) / 2)
+        def center(rid):
+            x0, y0, x1, y1 = room_by_id(sc, rid)["bounds"]
+            return ((x0 + x1) / 2, (y0 + y1) / 2)
         near, far = (a, b) if dist(robot_xy, center(a)) <= dist(robot_xy, center(b)) else (b, a)
     door_xy = (door["pose"][0], door["pose"][1])
     n = into_room(door_xy, room_by_id(sc, far))
@@ -178,17 +188,36 @@ def in_doorway(door, xy, sc):
     return across < CROSS_DONE_M and along < DOORWAY_HALF_WIDTH_M
 
 
-def holder_must_stay(switch_id, robot_id, sc, ws, robot_xy):
+def switch_active(ws, switch_id):
+    return any(s["id"] == switch_id and s.get("active") for s in (ws or {}).get("switches", []))
+
+
+def door_open(ws, door_id):
+    return any(d["id"] == door_id and d.get("open") for d in (ws or {}).get("doors", []))
+
+
+def holder_must_stay(switch_id, robot_id, sc, ws, robot_xy, steady_holders):
     """(door id, robot id) if the robot holding switch_id must stay on it, else None.
 
     A holder stays while another robot is in the opening of a door that would close without
-    this switch. This protects a crossing robot whatever the planner says.
+    this switch. Another switch only counts as keeping the door open if it is a latch that is
+    on, or a hold switch that is on AND held by a robot that keeps holding it: its executor
+    task is still HOLD:<that switch> with nothing pending (steady_holders: {switch: {robots}}).
     """
+    modes = {s["id"]: s["mode"] for s in sc["switches"]}
+
+    def keeps_open(s):
+        if not switch_active(ws, s):
+            return False
+        if modes.get(s) == "latch":
+            return True
+        return bool(steady_holders.get(s, set()) - {robot_id})
+
     for door in sc["doors"]:
         if switch_id not in door["requires"]:
             continue
-        others_on = [s for s in door["requires"] if s != switch_id and switch_active(ws, s)]
-        if door["logic"] == "any_of" and others_on:
+        others = [s for s in door["requires"] if s != switch_id]
+        if door["logic"] == "any_of" and any(keeps_open(s) for s in others):
             continue                                # another switch keeps it open
         for rid, xy in robot_xy.items():
             if rid != robot_id and xy is not None and in_doorway(door, xy, sc):
@@ -206,15 +235,300 @@ def waiting_for(door_id, ws):
     return enablers or None
 
 
-def switch_active(ws, switch_id):
-    return any(s["id"] == switch_id and s.get("active") for s in (ws or {}).get("switches", []))
+def finish_seen(ws, robot_id):
+    """True if the world state already shows the robot without a task."""
+    return any(r.get("id") == robot_id and r.get("task") is None for r in (ws or {}).get("robots", []))
 
 
-def door_open(ws, door_id):
-    return any(d["id"] == door_id and d.get("open") for d in (ws or {}).get("doors", []))
+# ------------------------------------------------------- the executor (no ROS) --
+
+class RobotRun:
+    """What one robot is doing."""
+
+    def __init__(self, rid, start_pose):
+        self.rid = rid
+        x, y, yaw = (list(start_pose) + [0.0, 0.0, 0.0])[:3]
+        self.start = (x, y, yaw)            # map -> odom (see launch/navigation.launch.py)
+        self.xy = None                      # position in the map frame, from odometry
+        self.task = None                    # current task id, or None
+        self.done_task = None               # last finished (or given-up) task
+        self.pending = None                 # next task, deferred while the robot must keep holding
+        self.status = "ok"                  # "ok" or "waiting"
+        self.waiting_for = None
+        self.cross = None                   # cross_plan() for a CROSS task
+        self.exit_spot = None
+        self.arrived = None                 # when the robot reached its switch pad
+        # Nav2 goal bookkeeping
+        self.goal_xy = None
+        self.nav = None                     # None | "no_server" | "pending" | "active" | "succeeded" | "failed"
+        self.gen = 0                        # increases with every goal or cancel; stale replies are ignored
+        self.failures = 0                   # Nav2 failures in a row
+        self.retry_at = 0.0
+
+
+class Executor:
+    """The executor's decisions, without ROS.
+
+    nav: sends goals for it: nav.ready(rid) -> bool, nav.send(rid, xy, gen), nav.cancel(rid, gen).
+         Replies come back through goal_accepted(rid, gen) and goal_done(rid, gen, ok, why).
+    log(text): one line of log.   clock(): monotonic seconds.   on_event(dict): mission events.
+    """
+
+    def __init__(self, sc, nav, log, clock=time.monotonic, on_event=None):
+        self.sc, self.nav, self.log, self.clock = sc, nav, log, clock
+        self.on_event = on_event or (lambda event: None)
+        self.radius = sc.get("scenario", {}).get("on_pad_radius_m", 0.30)
+        self.switches = {s["id"]: s for s in sc["switches"]}
+        self.doors = {d["id"]: d for d in sc["doors"]}
+        self.exit_xy = (sc["exit"]["pose"][0], sc["exit"]["pose"][1])
+        self.exit_room = room_by_id(sc, room_of(self.exit_xy, sc["rooms"]))
+        self.robots = {r["id"]: RobotRun(r["id"], r.get("start_pose", [0.0, 0.0, 0.0])) for r in sc["robots"]}
+        self.ws = None
+        self.first_plan_at = None
+        self.exit_times = {}
+        self.mission_done = False
+
+    # ---- inputs
+    def set_pose(self, rid, xy):
+        self.robots[rid].xy = xy
+
+    def set_odom(self, rid, px, py):
+        """Odometry position (odom frame) -> map frame, using the start pose."""
+        x0, y0, yaw0 = self.robots[rid].start
+        self.set_pose(rid, (x0 + math.cos(yaw0) * px - math.sin(yaw0) * py,
+                            y0 + math.sin(yaw0) * px + math.cos(yaw0) * py))
+
+    def set_world_state(self, ws):
+        self.ws = ws
+
+    def on_plan(self, plan):
+        if not isinstance(plan, dict):
+            self.log(f"ignoring a plan that is not a JSON object: {str(plan)[:80]}")
+            return
+        if self.first_plan_at is None:
+            self.first_plan_at = self.clock()
+            self.event({"event": "mission_started", "time": time.time(), "plan": plan})
+        for rid, task in plan.items():
+            if rid not in self.robots:
+                self.log(f"plan names unknown robot {rid!r}; ignored")
+                continue
+            self.assign(self.robots[rid], task)
+
+    # ---- tasks
+    def steady_holders(self):
+        """{switch: {robots}} whose task is HOLD:<switch> with nothing pending."""
+        out = {}
+        for o in self.robots.values():
+            kind, target = parse_task(o.task)
+            if kind == "HOLD" and o.pending is None:
+                out.setdefault(target, set()).add(o.rid)
+        return out
+
+    def must_stay(self, r):
+        """(door, robot) if r holds a switch that a robot in a doorway depends on, else None."""
+        kind, target = parse_task(r.task)
+        if kind != "HOLD" or not switch_active(self.ws, target):
+            return None                             # not holding a switch that is on
+        return holder_must_stay(target, r.rid, self.sc, self.ws,
+                                {o.rid: o.xy for o in self.robots.values()}, self.steady_holders())
+
+    def repeat_of_finished(self, r, task):
+        """True if `task` is the robot's finished task sent again before it can mean a new request."""
+        if r.task is not None or task != r.done_task:
+            return False
+        if not finish_seen(self.ws, r.rid):
+            return True                             # the planner may not have seen it finish yet
+        return task == "EXIT" and r.exit_spot is not None and r.xy is not None \
+            and dist(r.xy, r.exit_spot) <= EXIT_STAY_M
+
+    def assign(self, r, task):
+        """Apply one robot's entry of a plan. Returns what happened (for tests)."""
+        task = "WAIT" if task is None else task
+        if task != r.task:
+            blocker = self.must_stay(r)
+            if blocker:                             # interlock: don't drop a gate onto a robot
+                if r.pending != task:
+                    self.log(f"{r.rid}: stays on {parse_task(r.task)[1]} until {blocker[1]} is "
+                             f"through {blocker[0]}, then {task}")
+                r.pending = task
+                return "deferred"
+        r.pending = None
+        if task == "WAIT":
+            if r.task is not None:                  # an idle robot keeps its last finished task
+                self.log(f"{r.rid}: WAIT (stops {r.task})")
+                r.done_task = None
+            self.cancel(r)
+            r.task, r.status, r.waiting_for = None, "ok", None
+            return "wait"
+        if task == r.task:
+            return "kept"                           # same task again: keep going
+        if self.repeat_of_finished(r, task):
+            return "ignored"
+        problem = check_task(task, self.sc)
+        if problem:
+            self.log(f"{r.rid}: cannot execute {task!r} ({problem}); keeps {r.task}")
+            return "rejected"
+        self.log(f"{r.rid}: new task {task}" + (f" (was {r.task})" if r.task else ""))
+        self.cancel(r)                              # the old goal stops, whatever comes next
+        r.task, r.done_task = task, None
+        r.status, r.waiting_for, r.cross, r.exit_spot = "ok", None, None, None
+        r.failures, r.retry_at, r.arrived = 0, 0.0, None
+        return "started"
+
+    def finish(self, r, note=""):
+        self.log(f"{r.rid}: {r.task} done{note}")
+        if r.task == "EXIT" and self.first_plan_at is not None:
+            self.exit_times.setdefault(r.rid, round(self.clock() - self.first_plan_at, 2))
+        r.done_task, r.task = r.task, None
+        r.status, r.waiting_for, r.failures = "ok", None, 0
+        self.check_mission()
+
+    def give_up(self, r, why):
+        self.log(f"{r.rid}: gives up {r.task}: {why}; the planner will replan")
+        self.cancel(r)
+        r.done_task, r.task = r.task, None
+        r.status, r.waiting_for, r.failures = "ok", None, 0
+
+    def check_mission(self):
+        if self.mission_done or not all(o.task is None and o.done_task == "EXIT" for o in self.robots.values()):
+            return
+        self.mission_done = True
+        self.log("all robots are at the exit")
+        self.event({"event": "mission_complete", "time": time.time(),
+                    "t_since_first_plan": round(self.clock() - self.first_plan_at, 2)
+                    if self.first_plan_at is not None else None,
+                    "exit_times": dict(sorted(self.exit_times.items()))})
+
+    def event(self, event):
+        self.log("mission: " + json.dumps(event))
+        self.on_event(event)
+
+    # ---- Nav2 goals
+    def cancel(self, r):
+        r.gen += 1
+        self.nav.cancel(r.rid, r.gen)
+        r.nav, r.goal_xy = None, None
+
+    def go_to(self, r, xy):
+        """Make sure the robot is driving to xy (sends a goal only when needed)."""
+        if r.goal_xy == xy and r.nav in ("pending", "active", "succeeded"):
+            return
+        if r.goal_xy == xy and r.nav == "failed" and self.clock() < r.retry_at:
+            return
+        if not self.nav.ready(r.rid):
+            if r.nav != "no_server":
+                self.log(f"{r.rid}: waiting for Nav2 (/{r.rid}/navigate_to_pose)")
+            r.nav, r.goal_xy = "no_server", None
+            return
+        if r.goal_xy != xy:
+            r.failures = 0
+        r.gen += 1
+        r.goal_xy, r.nav = xy, "pending"
+        self.nav.send(r.rid, xy, r.gen)
+
+    def goal_accepted(self, rid, gen):
+        r = self.robots[rid]
+        if gen == r.gen:
+            r.nav = "active"
+
+    def goal_done(self, rid, gen, ok, why=""):
+        r = self.robots[rid]
+        if gen != r.gen:
+            return                                  # an old goal (replaced or canceled)
+        if ok:
+            r.nav, r.failures = "succeeded", 0
+            return
+        r.failures += 1
+        if r.failures >= MAX_NAV_FAILURES:
+            self.give_up(r, f"Nav2 failed {r.failures} times in a row (last: {why})")
+            return
+        delay = 2.0 * r.failures
+        r.nav, r.retry_at = "failed", self.clock() + delay
+        self.log(f"{r.rid}: Nav2 goal {r.goal_xy} for {r.task} failed ({why}, {r.failures}x); "
+                 f"retrying in {delay:.0f} s")
+
+    # ---- one control step
+    def step(self):
+        for r in self.robots.values():
+            if r.pending is not None and self.must_stay(r) is None:
+                self.assign(r, r.pending)           # the doorway is clear: do the deferred task
+        for r in self.robots.values():
+            self.step_robot(r)
+
+    def step_robot(self, r):
+        if r.task is None or r.xy is None:
+            return
+        ws = self.ws
+        kind, target = parse_task(r.task)
+        if kind in ("ACTIVATE", "HOLD"):
+            pad = (self.switches[target]["pose"][0], self.switches[target]["pose"][1])
+            if kind == "ACTIVATE" and switch_active(ws, target):
+                self.finish(r)
+                return
+            on_pad = dist(r.xy, pad) <= self.radius
+            if on_pad and r.nav == "succeeded":
+                if r.arrived is None:
+                    r.arrived = self.clock()
+                if kind == "ACTIVATE" and self.clock() - r.arrived > ACTIVATE_GIVE_UP_S:
+                    self.finish(r, " (on the pad, but the switch did not turn on: wrong color?)")
+                return
+            r.arrived = None
+            if not on_pad and r.nav == "succeeded":
+                r.nav = None                        # pushed off the pad: drive back
+            self.go_to(r, pad)
+        elif kind == "CROSS":
+            door = self.doors[target]
+            if r.cross is None:
+                r.cross = cross_plan(door, r.xy, self.sc)
+            action = cross_action(door_open(ws, target), progress_past(door, r.cross, r.xy))
+            reached_far_goal = r.nav == "succeeded" and r.goal_xy == r.cross["beyond"]
+            if action == "done" or reached_far_goal:
+                self.finish(r)
+                return
+            if action == "beyond":
+                if r.status != "ok":
+                    self.log(f"{r.rid}: {target} is open, crossing")
+                r.status, r.waiting_for = "ok", None
+                self.go_to(r, r.cross["beyond"])
+            else:
+                self.go_to(r, r.cross["staging"])
+                at_door = dist(r.xy, r.cross["staging"]) <= REACHED_M or r.nav == "succeeded"
+                if at_door and r.status != "waiting" and r.goal_xy == r.cross["staging"]:
+                    r.status, r.waiting_for = "waiting", waiting_for(target, ws)
+                    self.log(f"{r.rid}: waiting at closed {target} for {r.waiting_for}")
+        elif kind == "EXIT":
+            if r.exit_spot is None:
+                taken = [o.exit_spot for o in self.robots.values() if o is not r and o.exit_spot]
+                r.exit_spot = exit_slot(self.exit_xy, r.xy, taken, self.exit_room)
+            if dist(r.xy, r.exit_spot) <= REACHED_M or (r.nav == "succeeded" and r.goal_xy == r.exit_spot):
+                self.finish(r)
+                return
+            self.go_to(r, r.exit_spot)
+
+    def status(self):
+        """The /team/robot_status message."""
+        return {rid: {"task": r.task,
+                      "status": {"type": r.status, "repair_time": None, "waiting_for": r.waiting_for}}
+                for rid, r in self.robots.items()}
 
 
 # ------------------------------------------------------- self-test (no ROS) --
+
+class FakeNav:
+    """Stands in for Nav2 in the self-test: records goals and cancels."""
+
+    def __init__(self):
+        self.sent, self.canceled, self.server = [], [], True
+
+    def ready(self, rid):
+        return self.server
+
+    def send(self, rid, xy, gen):
+        self.sent.append((rid, xy, gen))
+
+    def cancel(self, rid, gen):
+        self.canceled.append(rid)
+
 
 def selftest():
     from world_state import TEST_SCENARIO as sc
@@ -263,12 +577,17 @@ def selftest():
     s2_only = {"switches": [{"id": "S1", "active": False}, {"id": "S2", "active": True}]}
     both = {"switches": [{"id": "S1", "active": True}, {"id": "S2", "active": True}]}
     check("robot1 in the doorway, only S2 on: robot2 stays on S2",
-          holder_must_stay("S2", "robot2", sc, s2_only, {"robot1": (0.3, 0.0), "robot2": (1.1, 1.45)}),
-          ("D1", "robot1"))
+          holder_must_stay("S2", "robot2", sc, s2_only, {"robot1": (0.3, 0.0), "robot2": (1.1, 1.45)},
+                           {"S2": {"robot2"}}), ("D1", "robot1"))
     check("robot1 clear of the doorway: robot2 may leave",
-          holder_must_stay("S2", "robot2", sc, s2_only, {"robot1": (0.9, 0.0), "robot2": (1.1, 1.45)}), None)
-    check("S1 also on: robot2 may leave",
-          holder_must_stay("S2", "robot2", sc, both, {"robot1": (0.3, 0.0), "robot2": (1.1, 1.45)}), None)
+          holder_must_stay("S2", "robot2", sc, s2_only, {"robot1": (0.9, 0.0), "robot2": (1.1, 1.45)},
+                           {"S2": {"robot2"}}), None)
+    check("S1 on and steadily held by robot3: robot2 may leave",
+          holder_must_stay("S2", "robot2", sc, both, {"robot1": (0.3, 0.0), "robot2": (1.1, 1.45)},
+                           {"S1": {"robot3"}, "S2": {"robot2"}}), None)
+    check("S1 on, but its holder is leaving too: robot2 stays",
+          holder_must_stay("S2", "robot2", sc, both, {"robot1": (0.3, 0.0), "robot2": (1.1, 1.45)},
+                           {"S2": {"robot2"}}), ("D1", "robot1"))
 
     print("exit spots:")
     exit_xy, room = (5.1, 0.0), sc["rooms"][1]
@@ -278,36 +597,126 @@ def selftest():
     check("second robot keeps its distance", dist(second, first) >= EXIT_SLOT_SPACING_M, True)
     check("second robot stays inside the room", second == clamp_into(room, second, margin=0.35), True)
 
+    # ---- the Executor class with a fake Nav2
+    def world(tasks=None, on=(), opened=False):
+        """A minimal world state: robots' tasks, switches that are on, door D1 open or not."""
+        return {"robots": [{"id": rid, "task": t} for rid, t in (tasks or {}).items()],
+                "switches": [{"id": s, "active": s in on} for s in ("S1", "S2")],
+                "doors": [{"id": "D1", "open": opened}], "tasks": []}
+
+    def executor(scenario=sc, clock=None):
+        nav, lines = FakeNav(), []
+        return Executor(scenario, nav, lines.append, clock=clock or (lambda: 0.0)), nav, lines
+
+    print("re-sent finished task (cross back):")
+    ex, nav, _ = executor()
+    r2 = ex.robots["robot2"]
+    ex.set_pose("robot2", (-0.9, 0.0))
+    ex.set_world_state(world({"robot2": None}, on=("S1",), opened=True))
+    ex.on_plan({"robot2": "CROSS:D1"})
+    ex.step()
+    check("CROSS:D1 starts: goal beyond the door", nav.sent[-1][:2], ("robot2", (0.9, 0.0)))
+    ex.set_pose("robot2", (0.7, 0.0))
+    ex.step()
+    check("0.7 m past the door: done", (r2.task, r2.done_task), (None, "CROSS:D1"))
+    ex.set_world_state(world({"robot2": "CROSS:D1"}, on=("S1",), opened=True))
+    check("re-sent while the world state still shows CROSS:D1: ignored",
+          ex.assign(r2, "CROSS:D1"), "ignored")
+    ex.set_world_state(world({"robot2": None}, on=("S1",), opened=True))
+    check("re-sent after the world state shows it finished: crosses back",
+          ex.assign(r2, "CROSS:D1"), "started")
+    ex.step()
+    check("crossing back: goal beyond the door in 1,1", nav.sent[-1][:2], ("robot2", (-0.9, 0.0)))
+
+    print("ACTIVATE that gives up (latch S1 that stays off):")
+    t = [0.0]
+    latch_sc = {**sc, "switches": [dict(sc["switches"][0], mode="latch"), sc["switches"][1]]}
+    ex, nav, _ = executor(latch_sc, clock=lambda: t[0])
+    r1 = ex.robots["robot1"]
+    ex.set_pose("robot1", (-1.1, -1.45))
+    ex.set_world_state(world({"robot1": None}))
+    ex.on_plan({"robot1": "ACTIVATE:S1"})
+    ex.step()
+    ex.goal_done("robot1", nav.sent[-1][2], True)
+    ex.step()
+    t[0] = 6.0
+    ex.step()
+    check("gives up after 5 s on the pad", (r1.task, r1.done_task), (None, "ACTIVATE:S1"))
+    ex.set_world_state(world({"robot1": "ACTIVATE:S1"}))
+    check("re-sent before the world state shows it: ignored", ex.assign(r1, "ACTIVATE:S1"), "ignored")
+    ex.set_world_state(world({"robot1": None}))
+    check("re-sent after: tried again", ex.assign(r1, "ACTIVATE:S1"), "started")
+
+    print("EXIT is idempotent:")
+    ex, nav, _ = executor()
+    r1 = ex.robots["robot1"]
+    ex.set_pose("robot1", (4.5, 0.0))
+    ex.set_world_state(world({"robot1": None}))
+    ex.on_plan({"robot1": "EXIT"})
+    ex.step()
+    check("already at its spot: EXIT done at once", (r1.task, r1.done_task), (None, "EXIT"))
+    check("EXIT re-sent while parked (world state shows it finished): ignored",
+          ex.assign(r1, "EXIT"), "ignored")
+
+    print("Nav2 failures:")
+    t = [0.0]
+    ex, nav, lines = executor(clock=lambda: t[0])
+    r1 = ex.robots["robot1"]
+    ex.set_pose("robot1", (-4.8, -0.65))
+    ex.set_world_state(world({"robot1": None}))
+    ex.on_plan({"robot1": "EXIT"})
+    for attempt in range(MAX_NAV_FAILURES):
+        ex.step()
+        ex.goal_done("robot1", nav.sent[-1][2], False, "aborted")
+        t[0] += 10.0
+    check(f"{MAX_NAV_FAILURES} goals sent", len(nav.sent), MAX_NAV_FAILURES)
+    check(f"after {MAX_NAV_FAILURES} failures in a row: task given up (null), status ok",
+          (r1.task, r1.done_task, r1.status), (None, "EXIT", "ok"))
+    check("the give-up is logged", any("gives up EXIT" in line for line in lines), True)
+
+    print("a new task cancels the old goal:")
+    ex, nav, _ = executor()
+    ex.set_pose("robot1", (-4.8, -0.65))
+    ex.set_world_state(world({"robot1": None}))
+    ex.on_plan({"robot1": "HOLD:S1"})
+    ex.step()
+    nav.canceled.clear()
+    ex.on_plan({"robot1": "EXIT"})
+    check("HOLD -> EXIT: the HOLD goal is canceled at once", nav.canceled, ["robot1"])
+
+    print("interlock with three robots (robot3 in the doorway, both holders told to leave):")
+    sc3 = {**sc, "robots": sc["robots"] + [{"id": "robot3", "colors": ["green"], "start_pose": [-3.0, 0.0, 0.0]}]}
+    ex, nav, lines = executor(sc3)
+    for rid, xy in (("robot1", (-1.1, -1.45)), ("robot2", (1.1, 1.45)), ("robot3", (0.1, 0.0))):
+        ex.set_pose(rid, xy)
+    ex.set_world_state(world({"robot1": None, "robot2": None, "robot3": None}, on=("S1", "S2"), opened=True))
+    ex.on_plan({"robot1": "HOLD:S1", "robot2": "HOLD:S2", "robot3": "CROSS:D1"})
+    ex.on_plan({"robot1": "EXIT", "robot2": "EXIT", "robot3": "CROSS:D1"})
+    tasks = {rid: (r.task, r.pending) for rid, r in ex.robots.items()}
+    check("robot1 leaves S1 (robot2 still holds S2)", tasks["robot1"], ("EXIT", None))
+    check("robot2 stays on S2 until robot3 is through", tasks["robot2"], ("HOLD:S2", "EXIT"))
+    ex.set_pose("robot3", (0.9, 0.0))
+    ex.step()
+    check("robot3 through: robot2 leaves too", ex.robots["robot2"].task, "EXIT")
+
+    print("mission events:")
+    events = []
+    ex = Executor(sc, FakeNav(), lambda text: None, clock=lambda: 7.0, on_event=events.append)
+    ex.set_world_state(world({"robot1": None, "robot2": None}))
+    for rid, xy in (("robot1", (4.5, 0.0)), ("robot2", (5.1, 0.6))):
+        ex.set_pose(rid, xy)
+    ex.on_plan({"robot1": "EXIT", "robot2": "EXIT"})
+    ex.robots["robot2"].exit_spot = (5.1, 0.6)
+    ex.step()
+    check("events: mission_started, mission_complete", [e["event"] for e in events],
+          ["mission_started", "mission_complete"])
+    check("exit times per robot", events[-1]["exit_times"], {"robot1": 0.0, "robot2": 0.0})
+
     print("ALL PASS" if bad == 0 else f"{bad} FAILED")
     return bad == 0
 
 
 # --------------------------------------------------------------- ROS 2 node --
-
-class RobotRun:
-    """What one robot is doing."""
-
-    def __init__(self, rid, start_pose):
-        self.rid = rid
-        x, y, yaw = (list(start_pose) + [0.0, 0.0, 0.0])[:3]
-        self.start = (x, y, yaw)            # map -> odom (see launch/navigation.launch.py)
-        self.xy = None                      # position in the map frame, from odometry
-        self.task = None                    # current task id, or None
-        self.done_task = None               # last finished task (a re-sent copy is ignored)
-        self.pending = None                 # next task, deferred while the robot must keep holding
-        self.status = "ok"                  # "ok" or "waiting"
-        self.waiting_for = None
-        self.cross = None                   # cross_plan() for a CROSS task
-        self.exit_spot = None
-        self.arrived = None                 # when the robot reached its switch pad
-        # Nav2 goal bookkeeping
-        self.goal_xy = None
-        self.nav = None                     # None | "pending" | "active" | "succeeded" | "failed"
-        self.handle = None
-        self.gen = 0                        # increases with every goal; stale callbacks are ignored
-        self.failures = 0
-        self.retry_at = 0.0
-
 
 def run(scenario_path):
     import rclpy
@@ -321,53 +730,87 @@ def run(scenario_path):
 
     with open(scenario_path) as f:
         sc = yaml.safe_load(f)
-    radius = sc["scenario"].get("on_pad_radius_m", 0.30)
-    switches = {s["id"]: s for s in sc["switches"]}
-    doors = {d["id"]: d for d in sc["doors"]}
-    exit_xy = (sc["exit"]["pose"][0], sc["exit"]["pose"][1])
-    exit_room = room_by_id(sc, room_of(exit_xy, sc["rooms"]))
 
     rclpy.init()
     node = rclpy.create_node("executor")
-    t0 = time.time()
-    log = lambda text: print(f"[{time.time() - t0:7.2f}s] {text}", flush=True)
-    robots = {r["id"]: RobotRun(r["id"], r["start_pose"]) for r in sc["robots"]}
-    clients = {rid: ActionClient(node, NavigateToPose, f"/{rid}/navigate_to_pose") for rid in robots}
-    latest = {"ws": None}
-    status_pub = node.create_publisher(
-        String, ROBOT_STATUS_TOPIC, QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
-    last_status = {"text": None, "time": 0.0}
+    t0 = time.monotonic()
+    log = lambda text: print(f"[{time.monotonic() - t0:7.2f}s] {text}", flush=True)
+    latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
-    def publish_status(force=False):
-        text = json.dumps({rid: {"task": r.task,
-                                 "status": {"type": r.status, "repair_time": None,
-                                            "waiting_for": r.waiting_for}}
-                           for rid, r in robots.items()})
-        now = time.time()
-        if force or text != last_status["text"] or now - last_status["time"] >= STATUS_PERIOD_S:
+    class Nav2Goals:
+        """Sends the executor's goals to /<robot>/navigate_to_pose and reports back."""
+
+        def __init__(self):
+            self.ex = None
+            self.clients = {r["id"]: ActionClient(node, NavigateToPose, f"/{r['id']}/navigate_to_pose")
+                            for r in sc["robots"]}
+            self.latest = {rid: 0 for rid in self.clients}
+            self.handles = {}
+
+        def ready(self, rid):
+            return self.clients[rid].server_is_ready()
+
+        def send(self, rid, xy, gen):
+            goal = NavigateToPose.Goal()
+            goal.pose.header.frame_id = "map"       # stamp 0 = use the latest transform
+            goal.pose.pose.position.x, goal.pose.pose.position.y = float(xy[0]), float(xy[1])
+            goal.pose.pose.orientation.w = 1.0
+            self.latest[rid] = gen
+            self.clients[rid].send_goal_async(goal).add_done_callback(
+                lambda f: self._response(rid, gen, f))
+
+        def cancel(self, rid, gen):
+            self.latest[rid] = gen
+            handle = self.handles.pop(rid, None)
+            if handle is not None:
+                handle.cancel_goal_async()
+
+        def _response(self, rid, gen, future):
+            handle = future.result()
+            if gen != self.latest[rid]:
+                if handle.accepted:
+                    handle.cancel_goal_async()      # a newer goal or a cancel replaced this one
+                return
+            if not handle.accepted:
+                self.ex.goal_done(rid, gen, False, "goal rejected")
+                return
+            self.handles[rid] = handle
+            self.ex.goal_accepted(rid, gen)
+            handle.get_result_async().add_done_callback(lambda f: self._result(rid, gen, f))
+
+        def _result(self, rid, gen, future):
+            status = future.result().status
+            why = {GoalStatus.STATUS_ABORTED: "aborted", GoalStatus.STATUS_CANCELED: "canceled"}.get(
+                status, f"status {status}")
+            self.ex.goal_done(rid, gen, status == GoalStatus.STATUS_SUCCEEDED, why)
+
+    mission_pub = node.create_publisher(String, MISSION_TOPIC,
+                                        QoSProfile(depth=5, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+    nav = Nav2Goals()
+    ex = Executor(sc, nav, log, on_event=lambda e: mission_pub.publish(String(data=json.dumps(e))))
+    nav.ex = ex
+
+    status_pub = node.create_publisher(String, ROBOT_STATUS_TOPIC, latched)
+    last_status = {"text": None, "time": -math.inf}
+
+    def publish_status():
+        text = json.dumps(ex.status())
+        now = time.monotonic()
+        if text != last_status["text"] or now - last_status["time"] >= STATUS_PERIOD_S:
             status_pub.publish(String(data=text))
             last_status.update(text=text, time=now)
 
-    # ---- inputs
-    def on_odom(rid, msg):
-        r = robots[rid]
-        x0, y0, yaw0 = r.start
-        px, py = msg.pose.pose.position.x, msg.pose.pose.position.y
-        r.xy = (x0 + math.cos(yaw0) * px - math.sin(yaw0) * py,
-                y0 + math.sin(yaw0) * px + math.cos(yaw0) * py)
-
-    for rid in robots:
-        node.create_subscription(Odometry, f"/{rid}/odom", lambda m, rid=rid: on_odom(rid, m),
-                                 qos_profile_sensor_data)
+    for rid in ex.robots:
+        node.create_subscription(
+            Odometry, f"/{rid}/odom",
+            lambda m, rid=rid: ex.set_odom(rid, m.pose.pose.position.x, m.pose.pose.position.y),
+            qos_profile_sensor_data)
 
     def on_world_state(msg):
         try:
-            latest["ws"] = json.loads(msg.data)
+            ex.set_world_state(json.loads(msg.data))
         except json.JSONDecodeError as e:
             log(f"ignoring a world state that is not JSON: {e}")
-
-    node.create_subscription(String, WORLD_STATE_TOPIC, on_world_state,
-                             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
     def on_plan(msg):
         try:
@@ -375,192 +818,25 @@ def run(scenario_path):
         except json.JSONDecodeError as e:
             log(f"ignoring a plan that is not JSON: {e}")
             return
-        if not isinstance(plan, dict):
-            log(f"ignoring a plan that is not a JSON object: {msg.data[:80]}")
-            return
-        for rid, task in plan.items():
-            if rid not in robots:
-                log(f"plan names unknown robot {rid!r}; ignored")
-                continue
-            assign(robots[rid], task)
+        ex.on_plan(plan)
         publish_status()
-
-    node.create_subscription(String, PLAN_TOPIC, on_plan, 10)   # planners publish volatile
-
-    # ---- tasks
-    def must_stay(r):
-        """(door, robot) if r holds a switch that a robot in a doorway depends on, else None."""
-        kind, target = parse_task(r.task)
-        if kind != "HOLD" or not switch_active(latest["ws"], target):
-            return None                             # not holding a switch that is on
-        return holder_must_stay(target, r.rid, sc, latest["ws"], {o.rid: o.xy for o in robots.values()})
-
-    def assign(r, task):
-        task = "WAIT" if task is None else task
-        if task != r.task:
-            blocker = must_stay(r)
-            if blocker:                             # interlock: don't drop a gate onto a robot
-                if r.pending != task:
-                    log(f"{r.rid}: stays on {parse_task(r.task)[1]} until {blocker[1]} is through "
-                        f"{blocker[0]}, then {task}")
-                r.pending = task
-                return
-        r.pending = None
-        if task == "WAIT":
-            if r.task is not None:                  # an idle robot keeps its last finished task
-                log(f"{r.rid}: WAIT (stops {r.task})")
-                r.done_task = None
-            cancel(r)
-            r.task, r.status, r.waiting_for = None, "ok", None
-            return
-        if task == r.task:
-            return                                  # same task again: keep going
-        if r.task is None and task == r.done_task:
-            return                                  # just finished this one
-        problem = check_task(task, sc)
-        if problem:
-            log(f"{r.rid}: cannot execute {task!r} ({problem}); keeps {r.task}")
-            return
-        log(f"{r.rid}: new task {task}" + (f" (was {r.task})" if r.task else ""))
-        r.task, r.done_task = task, None
-        r.status, r.waiting_for, r.cross, r.exit_spot = "ok", None, None, None
-        r.failures, r.retry_at, r.arrived = 0, 0.0, None
-        r.goal_xy = None                            # the next step sends a fresh goal
-
-    def finish(r, note=""):
-        log(f"{r.rid}: {r.task} done{note}")
-        r.done_task, r.task = r.task, None
-        r.status, r.waiting_for = "ok", None
-        publish_status(force=True)
-
-    # ---- Nav2 goals
-    def cancel(r):
-        r.gen += 1
-        if r.handle is not None:
-            r.handle.cancel_goal_async()
-        r.handle, r.nav, r.goal_xy = None, None, None
-
-    def go_to(r, xy):
-        """Make sure the robot is driving to xy (sends a goal only when needed)."""
-        if r.goal_xy == xy and r.nav in ("pending", "active", "succeeded"):
-            return
-        if r.goal_xy == xy and r.nav == "failed" and time.time() < r.retry_at:
-            return
-        client = clients[r.rid]
-        if not client.server_is_ready():
-            if r.nav != "no_server":
-                log(f"{r.rid}: waiting for Nav2 (/{r.rid}/navigate_to_pose)")
-            r.nav, r.goal_xy = "no_server", None
-            return
-        if r.goal_xy != xy:
-            r.failures = 0
-        goal = NavigateToPose.Goal()
-        goal.pose.header.frame_id = "map"           # stamp 0 = use the latest transform
-        goal.pose.pose.position.x, goal.pose.pose.position.y = float(xy[0]), float(xy[1])
-        goal.pose.pose.orientation.w = 1.0
-        r.gen += 1
-        gen = r.gen
-        r.goal_xy, r.nav, r.handle = xy, "pending", None
-        client.send_goal_async(goal).add_done_callback(lambda f: on_goal_response(r, gen, f))
-
-    def on_goal_response(r, gen, future):
-        handle = future.result()
-        if gen != r.gen:
-            if handle.accepted:
-                handle.cancel_goal_async()          # a newer goal or a WAIT replaced this one
-            return
-        if not handle.accepted:
-            nav_failed(r, "goal rejected")
-            return
-        r.handle, r.nav = handle, "active"
-        handle.get_result_async().add_done_callback(lambda f: on_result(r, gen, f))
-
-    def on_result(r, gen, future):
-        if gen != r.gen:
-            return
-        status = future.result().status
-        if status == GoalStatus.STATUS_SUCCEEDED:
-            r.nav, r.failures = "succeeded", 0
-        else:
-            nav_failed(r, {GoalStatus.STATUS_ABORTED: "aborted", GoalStatus.STATUS_CANCELED: "canceled"}
-                       .get(status, f"status {status}"))
-
-    def nav_failed(r, why):
-        r.failures += 1
-        delay = min(2.0 * r.failures, 10.0)
-        r.nav, r.handle, r.retry_at = "failed", None, time.time() + delay
-        log(f"{r.rid}: Nav2 goal {r.goal_xy} for {r.task} failed ({why}, {r.failures}x); "
-            f"retrying in {delay:.0f} s")
-
-    # ---- one control step per robot
-    def step(r):
-        if r.task is None or r.xy is None:
-            return
-        ws = latest["ws"]
-        kind, target = parse_task(r.task)
-        if kind in ("ACTIVATE", "HOLD"):
-            pad = (switches[target]["pose"][0], switches[target]["pose"][1])
-            if kind == "ACTIVATE" and switch_active(ws, target):
-                finish(r)
-                return
-            on_pad = dist(r.xy, pad) <= radius
-            if on_pad and r.nav == "succeeded":
-                r.arrived = r.arrived or time.time()
-                if kind == "ACTIVATE" and time.time() - r.arrived > ACTIVATE_GIVE_UP_S:
-                    finish(r, " (on the pad, but the switch did not turn on: wrong color?)")
-                return
-            r.arrived = None
-            if not on_pad and r.nav == "succeeded":
-                r.nav = None                        # pushed off the pad: drive back
-            go_to(r, pad)
-        elif kind == "CROSS":
-            door = doors[target]
-            if r.cross is None:
-                r.cross = cross_plan(door, r.xy, sc)
-            action = cross_action(door_open(ws, target), progress_past(door, r.cross, r.xy))
-            reached_far_goal = r.nav == "succeeded" and r.goal_xy == r.cross["beyond"]
-            if action == "done" or reached_far_goal:
-                finish(r)
-                return
-            if action == "beyond":
-                if r.status != "ok":
-                    log(f"{r.rid}: {target} is open, crossing")
-                r.status, r.waiting_for = "ok", None
-                go_to(r, r.cross["beyond"])
-            else:
-                go_to(r, r.cross["staging"])
-                at_door = dist(r.xy, r.cross["staging"]) <= REACHED_M or r.nav == "succeeded"
-                if at_door and r.status != "waiting" and r.goal_xy == r.cross["staging"]:
-                    r.status, r.waiting_for = "waiting", waiting_for(target, ws)
-                    log(f"{r.rid}: waiting at closed {target} for {r.waiting_for}")
-        elif kind == "EXIT":
-            if r.exit_spot is None:
-                taken = [o.exit_spot for o in robots.values() if o is not r and o.exit_spot]
-                r.exit_spot = exit_slot(exit_xy, r.xy, taken, exit_room)
-            if dist(r.xy, r.exit_spot) <= REACHED_M or (r.nav == "succeeded" and r.goal_xy == r.exit_spot):
-                finish(r)
-                if all(o.done_task == "EXIT" and o.task is None for o in robots.values()):
-                    log("all robots are at the exit")
-                return
-            go_to(r, r.exit_spot)
 
     def on_step():
-        for r in robots.values():
-            if r.pending is not None and must_stay(r) is None:
-                assign(r, r.pending)                # the doorway is clear: do the deferred task
-            step(r)
+        ex.step()
         publish_status()
 
+    node.create_subscription(String, WORLD_STATE_TOPIC, on_world_state, latched)
+    node.create_subscription(String, PLAN_TOPIC, on_plan, 10)   # planners publish volatile
     node.create_timer(1.0 / STEP_HZ, on_step)
-    log(f"executor up; robots {list(robots)}; listening on {PLAN_TOPIC}")
-    publish_status(force=True)
+    publish_status()
+    log(f"executor up; robots {list(ex.robots)}; listening on {PLAN_TOPIC}")
     try:
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        for r in robots.values():
-            cancel(r)
+        for r in ex.robots.values():
+            ex.cancel(r)
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

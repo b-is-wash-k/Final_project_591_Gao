@@ -132,6 +132,7 @@ robots_up() {
   for r in "${ROBOTS[@]}"; do grep -q -- "- $r$" <<< "$models" || return 1; done
 }
 nav_up() { [[ $(grep -c "Managed nodes are active" "$LOG_DIR/navigation.log" 2>/dev/null) -ge ${#ROBOTS[@]} ]]; }
+executor_up() { grep -q "executor up" "$LOG_DIR/executor.log" 2>/dev/null; }
 
 # 0. Refuse to start a second copy of the same world (two servers would confuse spawning and topics).
 if world_up; then
@@ -160,12 +161,15 @@ if [[ " ${GZ_ARGS[*]} " != *" -s "* ]]; then
   sleep 2
 fi
 
-# 2. One TurtleBot3 per robot in the scenario
+# 2. One TurtleBot3 per robot in the scenario. The first one also bridges /clock (exactly one
+#    clock bridge: two of them make Nav2 see time jump back).
+clock=true
 for line in "${ROBOT_LINES[@]}"; do
   read -r id x y yaw <<< "$line"
   say "spawn $id at ($x, $y)"
-  start_bg "$LOG_DIR/spawn_$id.log" ros2 launch nav2_minimal_tb3_sim spawn_tb3.launch.py \
-    namespace:="$id" robot_name:="$id" x_pose:="$x" y_pose:="$y" yaw:="$yaw"
+  start_bg "$LOG_DIR/spawn_$id.log" ros2 launch launch/spawn_robot.launch.py \
+    namespace:="$id" robot_name:="$id" x_pose:="$x" y_pose:="$y" yaw:="$yaw" bridge_clock:="$clock"
+  clock=false
 done
 wait_for 90 "robots ${ROBOTS[*]} to appear in Gazebo" robots_up
 say "robots are in Gazebo: ${ROBOTS[*]}"
@@ -179,10 +183,14 @@ PIDS+=($MANAGER)
 # 4. Nav2 for every robot, then the executor
 if ((NAV)); then
   say "Nav2 for ${ROBOTS[*]} (log: $LOG_DIR/navigation.log)"
-  start_bg "$LOG_DIR/navigation.log" ros2 launch launch/navigation.launch.py scenario:="$SCENARIO"
+  start_bg "$LOG_DIR/navigation.log" ros2 launch launch/navigation.launch.py scenario:="$SCENARIO" \
+    params_dir:="$LOG_DIR/nav2_params"
   wait_for 120 "Nav2 to become active for ${ROBOTS[*]}" nav_up
   say "Nav2 is active for ${ROBOTS[*]}"
   start_shown "$LOG_DIR/executor.log" "[executor] " "$PY scripts/executor.py '$SCENARIO'"
+  # /team/plan is volatile: start the planner only once the executor listens, so the first
+  # plan isn't lost.
+  wait_for 30 "the executor to start" executor_up
 fi
 
 # 5. The planner

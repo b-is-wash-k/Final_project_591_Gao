@@ -9,8 +9,8 @@
 #     drive_red / drive_blue    drive a robot with the keyboard (Ctrl+C to stop)
 #   With Nav2 and the executor running (run.sh --nav or --planner ...):
 #     send_plan robot1=HOLD:S1 robot2=CROSS:D1   send a plan by hand (WAIT for an idle robot)
-#     show_world_state / show_plan / show_status  print the latest message on /team/world_state,
-#                                                 /team/plan, /team/robot_status
+#     show_world_state / show_plan / show_status / show_mission  print /team/world_state,
+#                                                 /team/plan, /team/robot_status, /team/mission
 #   Don't use setpose or reset_robots while Nav2 runs: a teleported robot's odometry no longer
 #   matches its position, so Nav2 drives it to the wrong place.
 # Watch the run.sh terminal and the gate in Gazebo while these run.
@@ -81,9 +81,10 @@ except ValueError:
     sys.exit("usage: send_plan robot1=HOLD:S1 robot2=CROSS:D1   (WAIT for an idle robot)")' "$@") || return 1
   ros2 topic pub --once -w 1 /team/plan std_msgs/msg/String "{data: '$json'}" > /dev/null && echo "sent $json"
 }
-show_world_state() { ros2 topic echo /team/world_state --once --qos-durability transient_local --field data; }
-show_status()      { ros2 topic echo /team/robot_status --once --qos-durability transient_local --field data; }
+show_world_state() { ros2 topic echo /team/world_state --once --field data; }
+show_status()      { ros2 topic echo /team/robot_status --once --field data; }
 show_plan()        { ros2 topic echo /team/plan --once --field data; }   # waits for the next plan
+show_mission()     { ros2 topic echo /team/mission --field data; }        # mission start/complete events
 
 echo "test helpers loaded: test_a, test_b, reset_robots, setpose <robot> <x> <y>, drive_red, drive_blue,"
-echo "                     send_plan robot1=<task> ..., show_world_state, show_plan, show_status"
+echo "                     send_plan robot1=<task> ..., show_world_state, show_plan, show_status, show_mission"

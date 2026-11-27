@@ -8,18 +8,29 @@ so it can be swapped for the team's conventional planner or the SMART-LLM planne
 changing anything else. It is a stand-in: small, readable and greedy, not optimal.
 
 Rules, applied to the world state each time it changes (costs alone don't count):
-  1. Each robot's goal is the exit room. A robot outside it must cross the first door on the
-     shortest known route there (fewest doors). While the exit is unknown, it must cross the
-     nearest door that leads to an UNKNOWN room (exploring).
+  1. A robot that can reach the exit (it has an EXIT cost) needs no door. Any other robot
+     takes the shortest known route (fewest doors) to the exit room that uses only workable
+     doors: doors that stay open, or that free robots can open now. With no such route, or
+     while the exit is unknown, it heads for the nearest workable door into an UNKNOWN room.
+     A crossing in progress continues until the executor reports it done.
   2. Robots are handled in order: robots already crossing first, then by distance to their door.
-       - Door open, even without the switch this robot holds: CROSS. Whoever holds a switch
-         that keeps it open keeps holding it.
-       - Door closed: send the cheapest free robots of the right color to the door's switches
-         (HOLD or ACTIVATE; every switch for an all_of door). The robot then CROSSes and waits
-         at the door until it opens, or, if it is the one holding the door open, keeps holding
-         until another switch takes over (the handoff).
+       - Door kept open without this robot (latches, or a switch someone else holds): CROSS.
+         Whoever holds a switch that keeps it open keeps holding it.
+       - Otherwise: send the cheapest free robots of the right color to the door's switches
+         (HOLD or ACTIVATE; every switch of an all_of door, where one robot may press several
+         latches one after the other), never to the switch this robot holds. Once this plan
+         keeps the door open, the robot CROSSes (waiting at the door until it opens) or, if it
+         holds one of the door's switches, keeps holding it until another switch takes over
+         (the handoff).
        - Nobody can open it: the robot stays free and may help another robot instead.
-  3. Robots in the exit room that nobody needs go to EXIT. Everyone else WAITs.
+  3. If a robot is still stuck, one robot that could leave explores a door into an UNKNOWN
+     room for it. Robots that can reach the exit and that nobody needs go to EXIT; everyone
+     else WAITs.
+  4. Every plan is checked with the SMART-LLM planner's validator before it is sent (one task
+     per robot, one robot per task except EXIT/WAIT, colors, reachable targets, every crossed
+     door kept open by the plan). An invalid plan is not sent: the previous plan stays, if it
+     is still valid, otherwise every robot WAITs. The plan is re-sent every 5 s and as soon as
+     a new subscriber (an executor) connects.
 
 Usage (from the repository root; use the system python3):
     python3 scripts/baseline_planner.py --selftest   # check the rules on the two-room handoff
@@ -29,6 +40,14 @@ import json
 import sys
 import time
 from collections import deque
+from pathlib import Path
+
+# Every plan is checked with the SMART-LLM planner's validator (the same rules for both planners).
+sys.path.append(str(Path(__file__).resolve().parent.parent / "smart_llm_planner"))
+try:
+    from smart_llm_planner.validator import validate_plan
+except ImportError:                           # the package is missing: plans are sent unchecked
+    validate_plan = None
 
 WORLD_STATE_TOPIC = "/team/world_state"
 PLAN_TOPIC = "/team/plan"
@@ -104,30 +123,50 @@ class Planner:
         free = [s for s, h in on.items() if h is None]
         return {free[0]: None} if free else dict([min(on.items())])
 
-    def next_door(self, rid):
-        """First door on the robot's route (to the exit room, else to an UNKNOWN room), or None."""
+    def workable(self, door_id, rid):
+        """True if rid could get through door_id: it stays open, or free robots can open it."""
+        return self.kept_open_by(door_id, rid) is not None or self.enablers(door_id, rid) is not None
+
+    def next_doors(self, rid):
+        """Doors the robot may cross next, best first; [] if it needs none (it can reach the exit).
+
+        The route is the shortest one (fewest doors, over known rooms) that uses only workable
+        doors: doors that stay open, or that free robots can open now. It leads to the exit room;
+        if there is no such route (or the exit is unknown), to the nearest workable door into an
+        UNKNOWN room (exploring). Doors of the robot's own room are tried cheapest first.
+        """
         start = self.room_of.get(rid)
-        if start is None or start == self.exit_room:
-            return None
-        own_unknown = [d for d, other in self.graph.get(start, []) if other == "UNKNOWN"]
-        if self.exit_room is None and own_unknown:      # explore from here: the cheapest such door
-            return min(own_unknown, key=lambda d: (self.cost(rid, f"CROSS:{d}") or 1e9, d))
-        first = {start: None}                           # room -> first door on the way there
+        if start is None or start == self.exit_room or self.can_do(rid, "EXIT"):
+            return []
+        to_exit, explore = self.routes(rid)
+        return [to_exit] if to_exit else explore
+
+    def routes(self, rid):
+        """(first door to the exit room or None, [first doors toward workable UNKNOWN doors])."""
+        start = self.room_of.get(rid)
+        first = {start: None}                   # room -> first door on the route there
         queue = deque([start])
-        while queue:                                    # breadth-first: fewest doors
+        explore = []
+        while queue:                            # breadth-first: fewest doors
             room = queue.popleft()
-            for door_id, other in self.graph.get(room, []):
+            doors = self.graph.get(room, [])
+            if room == start:
+                doors = sorted(doors, key=lambda d: (self.cost(rid, f"CROSS:{d[0]}") or 1e9, d[0]))
+            for door_id, other in doors:
+                if not self.workable(door_id, rid):
+                    continue
                 step = first[room] or door_id
                 if other == "UNKNOWN":
-                    if self.exit_room is None:
-                        return step                     # nearest room with a door to UNKNOWN
+                    if step not in explore:
+                        explore.append(step)
                     continue
-                if other not in first:
-                    first[other] = step
-                    if other == self.exit_room:
-                        return step
-                    queue.append(other)
-        return None
+                if other in first:
+                    continue
+                first[other] = step
+                if other == self.exit_room:
+                    return step, explore
+                queue.append(other)
+        return None, explore
 
     def enablers(self, door_id, rid):
         """[(robot, task)] that would open door_id for rid, using free robots; None if impossible."""
@@ -137,6 +176,8 @@ class Planner:
         busy = set(self.assign) | {rid}
         options = []
         for s in ids:
+            if self.holding.get(rid) == s:
+                continue                            # rid holds it already; another switch must take over
             sw = self.switches[s]
             already = any(t in (f"HOLD:{s}", f"ACTIVATE:{s}") for t in self.assign.values())
             if sw["active"] and sw["mode"] == "latch" or already:
@@ -158,70 +199,96 @@ class Planner:
             return min(options, key=lambda o: (o[1], o[0]))[2] if options else None
         if len(options) < len(ids):
             return None                       # all_of: some switch can't be served
-        chosen, used = [], set()
-        for s, _, pairs in options:           # all_of: a different robot for every switch
+        chosen, used = [], {}
+        for s, _, pairs in options:           # all_of: a different robot for every HOLD
             for h, task in pairs:
                 if h in used:
+                    if task.startswith("ACTIVATE:") and used[h].startswith("ACTIVATE:"):
+                        continue              # one robot presses several latches, one per plan
                     return None
-                used.add(h)
+                used[h] = task
                 chosen.append((h, task))
         return chosen
 
+    def covered(self, door_id):
+        """True if this plan keeps door_id open (the plan validator's rule)."""
+        logic, ids = self.switch_ids(door_id)
+        if not ids:
+            return self.doors[door_id]["open"]
+        on = {s for s in ids
+              if self.switches[s]["mode"] == "latch" and self.switches[s]["active"]
+              or any(t in (f"HOLD:{s}", f"ACTIVATE:{s}") for t in self.assign.values())}
+        return on == set(ids) if logic == "all_of" else bool(on)
+
+    def try_door(self, rid, door):
+        """Give rid (and its helpers) tasks to get through door; False if that is not possible now."""
+        cross = f"CROSS:{door}"
+        if cross not in self.tasks or self.cost(rid, cross) is None or cross in self.assign.values():
+            return False                          # one robot per door at a time (only EXIT/WAIT are shared)
+        kept = self.kept_open_by(door, rid)
+        if kept is not None:
+            self.assign[rid], self.reason[rid] = cross, f"{door} is open"
+            for s, h in kept.items():
+                if h is not None:
+                    self.assign[h], self.reason[h] = f"HOLD:{s}", f"keeps {door} open for {rid}"
+            return True
+        helpers = self.enablers(door, rid)
+        if helpers is None:
+            return False
+        for h, task in helpers:
+            if h not in self.assign:
+                self.assign[h], self.reason[h] = task, f"opens {door} for {rid}"
+        if rid in self.assign:
+            return True                           # rid presses a latch itself first
+        held = self.holding.get(rid)
+        _, ids = self.switch_ids(door)
+        if held in ids:
+            self.assign[rid] = f"HOLD:{held}"
+            self.reason[rid] = f"holds {held} until another switch keeps {door} open, then crosses"
+        elif self.covered(door):
+            self.assign[rid], self.reason[rid] = cross, f"crosses {door} once it opens"
+        else:
+            self.reason[rid] = f"waits until {door} can be kept open"   # more latches to press first
+        return True
+
     # ---- the plan
     def plan(self):
-        needs = {rid: self.next_door(rid) for rid in self.robots}
+        doors = {rid: self.next_doors(rid) for rid in self.robots}
         for rid, r in self.robots.items():
             # A crossing ends when the executor reports it done (task back to null), not when the
             # robot's center enters the next room: until then it keeps crossing and its door
             # stays open, so no gate closes on a robot still in the doorway.
             task = r.get("task") or ""
             if task.startswith("CROSS:") and task in self.tasks:
-                needs[rid] = task[len("CROSS:"):]
+                doors[rid] = [task[len("CROSS:"):]]
         for rid, r in self.robots.items():
             if (r.get("status") or {}).get("type") == "broken":
                 self.assign[rid], self.reason[rid] = "WAIT", "broken"
 
         def order(rid):
-            door = needs[rid]
-            crossing = self.robots[rid].get("task") == f"CROSS:{door}"
-            return (not crossing, self.cost(rid, f"CROSS:{door}") or 1e9, rid)
+            crossing = self.robots[rid].get("task") == f"CROSS:{doors[rid][0]}"
+            return (not crossing, self.cost(rid, f"CROSS:{doors[rid][0]}") or 1e9, rid)
 
-        for rid in sorted((r for r in self.robots if needs[r] is not None), key=order):
-            if rid in self.assign:
-                continue
-            door = needs[rid]
-            cross = f"CROSS:{door}"
-            if cross not in self.tasks or self.cost(rid, cross) is None or cross in self.assign.values():
-                continue                      # one robot per door at a time (only EXIT/WAIT are shared)
-            kept = self.kept_open_by(door, rid)
-            if kept is not None:
-                self.assign[rid], self.reason[rid] = cross, f"{door} is open"
-                for s, h in kept.items():
-                    if h is not None:
-                        self.assign[h], self.reason[h] = f"HOLD:{s}", f"keeps {door} open for {rid}"
-                continue
-            helpers = self.enablers(door, rid)
-            if helpers is None:
-                continue                      # nobody can open it now; rid may help others
-            for h, task in helpers:
-                if h not in self.assign:
-                    self.assign[h], self.reason[h] = task, f"opens {door} for {rid}"
-            if rid in self.assign:
-                continue                      # rid presses a latch itself first
-            held = self.holding.get(rid)
-            _, ids = self.switch_ids(door)
-            if held in ids:
-                self.assign[rid] = f"HOLD:{held}"
-                self.reason[rid] = f"holds {held} until another switch keeps {door} open, then crosses"
-            else:
-                self.assign[rid], self.reason[rid] = cross, f"crosses {door} once it opens"
+        for rid in sorted((r for r in self.robots if doors[r]), key=order):
+            if rid not in self.assign:
+                any(self.try_door(rid, door) for door in doors[rid])   # first door that works
+
+        stuck = [r for r in self.robots if r not in self.assign and not self.can_do(r, "EXIT")]
+        if stuck:
+            # Someone can't get anywhere: one robot that could leave explores for them instead
+            # (a new room may hold the switch that opens their door).
+            for rid in sorted((r for r in self.robots if r not in self.assign and r not in stuck),
+                              key=lambda r: (min((self.cost(r, f"CROSS:{d}") or 1e9 for d in self.routes(r)[1]),
+                                                 default=1e9), r)):
+                if any(self.try_door(rid, door) for door in self.routes(rid)[1]):
+                    self.reason[rid] = f"explores for {', '.join(stuck)}"
+                    break
 
         for rid in sorted(self.robots):
             if rid in self.assign:
                 continue
-            if self.exit_room is not None and needs[rid] is None and self.room_of.get(rid) == self.exit_room \
-                    and self.can_do(rid, "EXIT"):
-                self.assign[rid], self.reason[rid] = "EXIT", "in the exit room"
+            if self.can_do(rid, "EXIT"):
+                self.assign[rid], self.reason[rid] = "EXIT", "can reach the exit"
             else:
                 self.assign[rid], self.reason[rid] = "WAIT", "nothing useful to do now"
         return ({rid: self.assign[rid] for rid in sorted(self.robots)},
@@ -231,6 +298,24 @@ class Planner:
 def plan(ws):
     """World state -> ({robot: task id or "WAIT"}, {robot: reason})."""
     return Planner(ws).plan()
+
+
+def checked_plan(ws, previous=None, planner=plan):
+    """planner(ws), checked with the SMART-LLM plan validator before it is sent.
+
+    Returns (assignments, reasons, errors). If the new plan breaks a rule, `errors` says why and
+    the previous plan is kept if it is still valid; otherwise every robot WAITs.
+    """
+    assignments, reasons = planner(ws)
+    if validate_plan is None:
+        return assignments, reasons, []
+    errors = validate_plan(assignments, ws)
+    if not errors:
+        return assignments, reasons, []
+    if previous is not None and not validate_plan(previous, ws):
+        return dict(previous), {rid: "previous plan kept (the new one is invalid)" for rid in previous}, errors
+    robots = sorted(r["id"] for r in ws["robots"])
+    return {rid: "WAIT" for rid in robots}, {rid: "the new plan is invalid" for rid in robots}, errors
 
 
 def structure_key(ws):
@@ -305,6 +390,56 @@ def selftest():
     check("door with open_if None but open: one robot crosses at a time", ws_open,
           {"robot1": "CROSS:D1", "robot2": "WAIT"})
 
+    print("exploring: the cheapest door can't be opened, another one can:")
+    sc3 = {"rooms": [{"id": "1,1", "bounds": [-6.0, -2.5, 0.0, 2.5]}, {"id": "1,2", "bounds": [0.0, -2.5, 6.0, 2.5]},
+                     {"id": "2,1", "bounds": [-6.0, -7.5, 0.0, -2.5]}],
+           "robots": [{"id": "robot1", "colors": ["red"]}, {"id": "robot2", "colors": ["blue"]}],
+           "switches": [{"id": "S1", "color": "red", "mode": "hold", "pose": [-3.0, 1.5, 0.0]},
+                        {"id": "S9", "color": "blue", "mode": "hold", "pose": [3.0, 1.5, 0.0]}],
+           "doors": [{"id": "D1", "logic": "all_of", "requires": ["S9"], "pose": [0.0, 0.0, 0.0],
+                      "connects": ["1,1", "1,2"]},
+                     {"id": "D2", "logic": "any_of", "requires": ["S1"], "pose": [-4.5, -2.5, 0.0],
+                      "connects": ["1,1", "2,1"]}],
+           "exit": {"id": "EXIT", "pose": [-3.0, -5.0, 0.0]}}
+    near_d1 = {"robot1": (-1.0, -0.6), "robot2": (-1.0, 0.6)}
+    check("D1 (cheapest, its switch not found) is skipped: red holds S1, blue crosses D2",
+          W.build_world_state(sc3, {"1,1"}, near_d1, {"S1": False, "S9": False}, {"D1": False, "D2": False}),
+          {"robot1": "HOLD:S1", "robot2": "CROSS:D2"})
+
+    print("a helper is never sent to the switch the crossing robot holds:")
+    sc_e4 = {**sc, "switches": [sc["switches"][0]],
+             "doors": [{**sc["doors"][0], "requires": ["S1"]}],
+             "robots": sc["robots"] + [{"id": "robot3", "colors": ["red"]}]}
+    xy_e4 = {"robot1": (-1.1, -1.45), "robot2": (3.0, 0.0), "robot3": (-3.0, 0.0)}
+    ws_e4 = W.build_world_state(sc_e4, {"1,1", "1,2"}, xy_e4, {"S1": True}, {"D1": True},
+                                {"robot1": {"task": "HOLD:S1"}})
+    check("red robot1 holds S1: red robot3 crosses, robot1 keeps holding, robot2 exits", ws_e4,
+          {"robot1": "HOLD:S1", "robot2": "EXIT", "robot3": "CROSS:D1"})
+
+    print("one robot presses the two latches of an all_of door, one at a time:")
+    sc_latch = {**sc, "switches": [dict(sc["switches"][0], mode="latch"),
+                                   {"id": "S3", "color": "red", "mode": "latch", "pose": [-3.0, 1.5, 0.0]}],
+                "doors": [{**sc["doors"][0], "logic": "all_of", "requires": ["S1", "S3"]}]}
+    check("first latch S1; blue waits (D1 not yet kept open)",
+          W.build_world_state(sc_latch, {"1,1"}, start, {"S1": False, "S3": False}, {"D1": False}),
+          {"robot1": "ACTIVATE:S1", "robot2": "WAIT"})
+    check("S1 on: second latch S3",
+          W.build_world_state(sc_latch, {"1,1"}, {"robot1": (-1.1, -1.45), "robot2": (-4.8, 0.65)},
+                              {"S1": True, "S3": False}, {"D1": False}),
+          {"robot1": "ACTIVATE:S3", "robot2": "CROSS:D1"})
+
+    print("every plan is checked with the SMART-LLM validator:")
+    ws_t0 = state({"1,1"}, start, {"S1": False, "S2": False}, {"D1": False}, {})
+    invalid = lambda ws: ({"robot1": "HOLD:S1", "robot2": "HOLD:S1"}, {})
+    good = {"robot1": "HOLD:S1", "robot2": "CROSS:D1"}
+    for name, previous, want in (("invalid new plan: the previous valid plan is kept", good, good),
+                                 ("invalid new plan, no previous plan: everyone waits", None,
+                                  {"robot1": "WAIT", "robot2": "WAIT"})):
+        got, _, errors = checked_plan(ws_t0, previous, planner=invalid)
+        ok = got == want and bool(errors) and validate_plan is not None
+        bad += not ok
+        print(f"  {'PASS' if ok else 'FAIL'}  {name}: {got}" + ("" if ok else f"; errors {errors}"))
+
     print("ALL PASS" if bad == 0 else f"{bad} FAILED")
     return bad == 0
 
@@ -321,9 +456,11 @@ def run():
     node = rclpy.create_node("baseline_planner")
     t0 = time.time()
     log = lambda text: print(f"[{time.time() - t0:7.2f}s] {text}", flush=True)
-    plan_pub = node.create_publisher(String, PLAN_TOPIC, 10)
+    plan_pub = node.create_publisher(String, PLAN_TOPIC, 10)    # volatile, like every planner
     log_pub = node.create_publisher(String, LOG_TOPIC, 10)
-    current = {"key": None, "plan": None, "sent": 0.0}
+    current = {"key": None, "plan": None, "sent": 0.0, "subscribers": 0}
+    if validate_plan is None:
+        log("SMART-LLM validator not found (smart_llm_planner/): plans are sent unchecked")
 
     def send():
         plan_pub.publish(String(data=json.dumps(current["plan"])))
@@ -340,25 +477,33 @@ def run():
             return
         current["key"] = key
         try:
-            assignments, reasons = plan(ws)
+            assignments, reasons, errors = checked_plan(ws, current["plan"])
         except (KeyError, TypeError, ValueError) as e:
             log(f"could not plan on this world state ({type(e).__name__}: {e}); keeping the last plan")
             return
+        if errors:
+            log(f"the new plan breaks the plan rules ({'; '.join(errors)}); sending {assignments}")
         changed = assignments != current["plan"]
         current["plan"] = assignments
         send()
         log_pub.publish(String(data=json.dumps(
-            {"planner": "baseline", "time": time.time(), "assignments": assignments, "reasons": reasons})))
+            {"planner": "baseline", "time": time.time(), "assignments": assignments, "reasons": reasons,
+             "errors": errors})))
         if changed:
             log("plan: " + ", ".join(f"{rid} {task} ({reasons[rid]})" for rid, task in assignments.items()))
 
     def on_timer():
-        if current["plan"] is not None and time.time() - current["sent"] >= REPUBLISH_PERIOD_S:
-            send()
+        if current["plan"] is None:
+            return
+        subscribers = plan_pub.get_subscription_count()
+        new_subscriber = subscribers > current["subscribers"]
+        current["subscribers"] = subscribers
+        if new_subscriber or time.time() - current["sent"] >= REPUBLISH_PERIOD_S:
+            send()                            # an executor that just connected gets the plan at once
 
     node.create_subscription(String, WORLD_STATE_TOPIC, on_world_state,
                              QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
-    node.create_timer(1.0, on_timer)
+    node.create_timer(0.5, on_timer)
     log(f"baseline planner up; waiting for {WORLD_STATE_TOPIC}")
     try:
         rclpy.spin(node)

@@ -31,6 +31,7 @@ ROBOT_STATUS_TOPIC = "/team/robot_status"
 STATUS_TYPES = ("ok", "broken", "waiting")
 COSTS_ONLY_MIN_PERIOD_S = 0.5    # when only costs change (robots moving), publish at most this often
 HEARTBEAT_PERIOD_S = 2.0         # re-send the latest state at least this often, even if nothing changed
+ROBOT_STATUS_TIMEOUT_S = 5.0     # a robot's task/status is dropped after this long without a status
 
 
 # -------------------------------------------------------------- puzzle rules --
@@ -123,6 +124,30 @@ def robot_info_from_status(text, robot_ids):
     return info
 
 
+class RobotStatus:
+    """Each robot's latest task and status from /team/robot_status (the executor sends >= 1 Hz).
+
+    An entry not refreshed for ROBOT_STATUS_TIMEOUT_S is dropped (the executor stopped), so the
+    world state falls back to status ok and task null instead of showing a stale task forever.
+    """
+
+    def __init__(self, clock=time.monotonic, timeout_s=ROBOT_STATUS_TIMEOUT_S):
+        self.clock, self.timeout_s = clock, timeout_s
+        self.entries, self.seen = {}, {}
+
+    def update(self, info):
+        for rid, entry in info.items():
+            self.entries[rid], self.seen[rid] = entry, self.clock()
+
+    def current(self):
+        """(robot_info for world_state, [robots just dropped])."""
+        now = self.clock()
+        dropped = sorted(rid for rid, t in self.seen.items() if now - t > self.timeout_s)
+        for rid in dropped:
+            del self.entries[rid], self.seen[rid]
+        return dict(self.entries), dropped
+
+
 # ------------------------------------------------------- self-test (no Gazebo) --
 
 def selftest():
@@ -163,6 +188,14 @@ def selftest():
          {"robot2": {"task": None, "status": {"type": "ok", "repair_time": None, "waiting_for": None}}}),
         ("robot status: not JSON",     robot_info_from_status("nope", {"robot1"}), None),
     ]
+    t = [0.0]
+    status = RobotStatus(clock=lambda: t[0])
+    status.update({"robot1": {"task": "HOLD:S1"}, "robot2": {"task": None}})
+    t[0] = 3.0
+    status.update({"robot2": {"task": "EXIT"}})
+    t[0] = 6.0
+    cases.append(("robot status: robot1 silent for 6 s is dropped, robot2 kept",
+                  status.current(), ({"robot2": {"task": "EXIT"}}, ["robot1"])))
     bad = 0
     for name, got, want in cases:
         ok = got == want
@@ -248,8 +281,8 @@ def run(scenario_path):
     log(f"switch manager up; world={world}; watching robots {list(robots)}")
 
     # World state for the planners (scripts/world_state.py)
-    robot_info = {}                              # robot id -> {"task", "status"}, from the executor
-    publish_world_state, spin_ros = start_world_state_publisher(set(robots), robot_info.update, log)
+    robot_status = RobotStatus()                 # robot id -> {"task", "status"}, from the executor
+    publish_world_state, spin_ros = start_world_state_publisher(set(robots), robot_status.update, log)
     if publish_world_state is None:
         log(f"ROS 2 not sourced: world state is built but not published on {WORLD_STATE_TOPIC}")
     problems = world_state.check_scenario(sc)
@@ -293,6 +326,10 @@ def run(scenario_path):
             try:
                 if spin_ros:
                     spin_ros()                   # robot tasks/status from the executor, if it runs
+                robot_info, dropped = robot_status.current()
+                for rid in dropped:
+                    log(f"no {ROBOT_STATUS_TOPIC} for {rid} for {ROBOT_STATUS_TIMEOUT_S:.0f} s: "
+                        f"its task and status are reset")
                 robot_xy = dict(poses)           # copy: the Gazebo callback updates poses in another thread
                 known_rooms = world_state.discover(known_rooms, robot_xy, sc["rooms"])
                 state = world_state.build_world_state(sc, known_rooms, robot_xy, switch_on, door_open,
