@@ -7,17 +7,31 @@ position to the Gazebo topic /maze/door/<ID>/position.
 
     robot poses (Gazebo) -> switch manager -> gate controller -> gate moves
 
+It also builds the planners' world state (scripts/world_state.py) and publishes
+it as JSON on the ROS 2 topic /team/world_state. Each robot's "task" and "status"
+in it come from the executor, on /team/robot_status.
+
 Usage (from the repository root; use the system python3):
     python3 scripts/switch_manager.py --selftest            # check the rules, no Gazebo needed
     python3 scripts/switch_manager.py config/scenario.yaml  # run with Gazebo
 """
+import json
 import math
 import sys
 import time
+import traceback
 
 import yaml
 
+import world_state
+
 RATE_HZ = 10
+WORLD_STATE_TOPIC = "/team/world_state"
+ROBOT_STATUS_TOPIC = "/team/robot_status"
+STATUS_TYPES = ("ok", "broken", "waiting")
+COSTS_ONLY_MIN_PERIOD_S = 0.5    # when only costs change (robots moving), publish at most this often
+HEARTBEAT_PERIOD_S = 2.0         # re-send the latest state at least this often, even if nothing changed
+ROBOT_STATUS_TIMEOUT_S = 5.0     # a robot's task/status is dropped after this long without a status
 
 
 # -------------------------------------------------------------- puzzle rules --
@@ -64,7 +78,10 @@ def door_should_open(door, switch_on):
     door:      one entry of `doors`, e.g. {"id": "D1", "logic": "any_of", "requires": ["S1", "S2"], ...}
     switch_on: dict switch id -> True/False, e.g. {"S1": True, "S2": False}
     Rules: any_of = at least one required switch ON; all_of = every required switch ON.
+    A door that requires no switch at all is always open (a plain passage).
     """
+    if not door["requires"]:
+        return True
     required_states = [switch_on[sid] for sid in door["requires"]]
 
     if door["logic"] == "any_of":
@@ -73,6 +90,62 @@ def door_should_open(door, switch_on):
         return all(required_states)
 
     raise ValueError(f"Unknown door logic: {door['logic']}")
+
+
+def robot_info_from_status(text, robot_ids):
+    """A /team/robot_status message (JSON text) -> world_state's robot_info, or None if invalid.
+
+    Expected: {"robot1": {"task": "HOLD:S1" or null,
+                          "status": {"type": "ok"|"broken"|"waiting", "repair_time", "waiting_for"}}}
+    Unknown robots and malformed entries are skipped; missing or bad fields get the defaults.
+    """
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    info = {}
+    for rid, entry in data.items():
+        if rid not in robot_ids or not isinstance(entry, dict):
+            continue
+        task = entry.get("task")
+        status = entry.get("status") if isinstance(entry.get("status"), dict) else {}
+        repair = status.get("repair_time")
+        waiting = status.get("waiting_for")
+        info[rid] = {
+            "task": task if isinstance(task, str) else None,
+            "status": {
+                "type": status.get("type") if status.get("type") in STATUS_TYPES else "ok",
+                "repair_time": repair if isinstance(repair, (int, float)) and not isinstance(repair, bool) else None,
+                "waiting_for": [w for w in waiting if isinstance(w, str)] if isinstance(waiting, list) else None,
+            },
+        }
+    return info
+
+
+class RobotStatus:
+    """Each robot's latest task and status from /team/robot_status (the executor sends >= 1 Hz).
+
+    An entry not refreshed for ROBOT_STATUS_TIMEOUT_S is dropped (the executor stopped), so the
+    world state falls back to status ok and task null instead of showing a stale task forever.
+    """
+
+    def __init__(self, clock=time.monotonic, timeout_s=ROBOT_STATUS_TIMEOUT_S):
+        self.clock, self.timeout_s = clock, timeout_s
+        self.entries, self.seen = {}, {}
+
+    def update(self, info):
+        for rid, entry in info.items():
+            self.entries[rid], self.seen[rid] = entry, self.clock()
+
+    def current(self):
+        """(robot_info for world_state, [robots just dropped])."""
+        now = self.clock()
+        dropped = sorted(rid for rid, t in self.seen.items() if now - t > self.timeout_s)
+        for rid in dropped:
+            del self.entries[rid], self.seen[rid]
+        return dict(self.entries), dropped
 
 
 # ------------------------------------------------------- self-test (no Gazebo) --
@@ -103,7 +176,26 @@ def selftest():
         ("all_of: one on",             door_should_open(all_door, {"S1": True, "S2": False}), False),
         # old: ("all_of: both on",            door_should_open(all_door, {"S_R": True, "S_B": True}), True),
         ("all_of: both on",            door_should_open(all_door, {"S1": True, "S2": True}), True),
+        ("no switch needed: open",     door_should_open({"id": "D3", "logic": "any_of", "requires": []}, {}), True),
+        ("robot status: executor message",
+         robot_info_from_status('{"robot1": {"task": "CROSS:D1", "status": {"type": "waiting", '
+                                '"repair_time": null, "waiting_for": ["HOLD:S1"]}}}', {"robot1", "robot2"}),
+         {"robot1": {"task": "CROSS:D1",
+                     "status": {"type": "waiting", "repair_time": None, "waiting_for": ["HOLD:S1"]}}}),
+        ("robot status: unknown robot and bad fields",
+         robot_info_from_status('{"robot9": {"task": "EXIT"}, "robot2": {"task": 5, "status": "x"}}',
+                                {"robot1", "robot2"}),
+         {"robot2": {"task": None, "status": {"type": "ok", "repair_time": None, "waiting_for": None}}}),
+        ("robot status: not JSON",     robot_info_from_status("nope", {"robot1"}), None),
     ]
+    t = [0.0]
+    status = RobotStatus(clock=lambda: t[0])
+    status.update({"robot1": {"task": "HOLD:S1"}, "robot2": {"task": None}})
+    t[0] = 3.0
+    status.update({"robot2": {"task": "EXIT"}})
+    t[0] = 6.0
+    cases.append(("robot status: robot1 silent for 6 s is dropped, robot2 kept",
+                  status.current(), ({"robot2": {"task": "EXIT"}}, ["robot1"])))
     bad = 0
     for name, got, want in cases:
         ok = got == want
@@ -114,6 +206,50 @@ def selftest():
 
 
 # ------------------------------------------------------------- Gazebo I/O loop --
+
+def start_world_state_publisher(robot_ids, on_robot_info, log):
+    """(publish, spin_once) for the ROS 2 side, or (None, None) if ROS 2 isn't sourced.
+
+    publish(text): publish a JSON string on /team/world_state. The topic is 'transient local':
+        a node that subscribes later with transient-local QoS gets the latest state at once. A
+        volatile subscriber gets it within HEARTBEAT_PERIOD_S, because run() re-sends the
+        latest state at least that often.
+    spin_once(): handle waiting /team/robot_status messages (from the executor); each valid one
+        is passed to on_robot_info(robot_info).
+    """
+    try:
+        import rclpy
+        from rclpy.qos import DurabilityPolicy, QoSProfile
+        from rclpy.signals import SignalHandlerOptions
+        from std_msgs.msg import String
+    except ImportError:
+        return None, None
+    # No rclpy signal handlers: Ctrl+C / SIGTERM (from run.sh) stop this script directly,
+    # instead of invalidating the ROS context and failing the next publish or spin.
+    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+    ros_node = rclpy.create_node("switch_manager")
+    qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+    pub = ros_node.create_publisher(String, WORLD_STATE_TOPIC, qos)
+
+    def on_status(msg):
+        info = robot_info_from_status(msg.data, robot_ids)
+        if info is None:
+            log(f"ignoring an invalid {ROBOT_STATUS_TOPIC} message: {msg.data[:80]}")
+        else:
+            on_robot_info(info)
+
+    # The executor publishes transient local, so the latest status arrives even if it started first.
+    ros_node.create_subscription(String, ROBOT_STATUS_TOPIC, on_status, qos)
+
+    def publish(text):
+        msg = String()
+        msg.data = text
+        pub.publish(msg)
+
+    def spin_once():
+        rclpy.spin_once(ros_node, timeout_sec=0.0)
+    return publish, spin_once
+
 
 def run(scenario_path):
     from gz.transport13 import Node
@@ -144,6 +280,22 @@ def run(scenario_path):
     log = lambda text: print(f"[{time.time() - t0:7.2f}s] {text}", flush=True)
     log(f"switch manager up; world={world}; watching robots {list(robots)}")
 
+    # World state for the planners (scripts/world_state.py)
+    robot_status = RobotStatus()                 # robot id -> {"task", "status"}, from the executor
+    publish_world_state, spin_ros = start_world_state_publisher(set(robots), robot_status.update, log)
+    if publish_world_state is None:
+        log(f"ROS 2 not sourced: world state is built but not published on {WORLD_STATE_TOPIC}")
+    problems = world_state.check_scenario(sc)
+    for problem in problems:
+        log(f"scenario problem: {problem}")
+    world_state_on = not problems
+    if problems:
+        log("world state off until the scenario is fixed; switches and doors keep working")
+    known_rooms = set()
+    last_structure = last_full = None   # structure = everything except costs
+    last_summary = None                 # known rooms + task ids, for the log line
+    last_publish_time = -math.inf       # time.monotonic() of the last publish
+
     while True:
         if set(poses) != set(robots):
             missing = sorted(set(robots) - set(poses))
@@ -169,6 +321,43 @@ def run(scenario_path):
             msg = Double()
             msg.data = d["open_joint_position_m"] if should else d["closed_joint_position_m"]
             pubs[d["id"]].publish(msg)           # re-sent every step, so a lost message doesn't matter
+
+        if world_state_on:
+            try:
+                if spin_ros:
+                    spin_ros()                   # robot tasks/status from the executor, if it runs
+                robot_info, dropped = robot_status.current()
+                for rid in dropped:
+                    log(f"no {ROBOT_STATUS_TOPIC} for {rid} for {ROBOT_STATUS_TIMEOUT_S:.0f} s: "
+                        f"its task and status are reset")
+                robot_xy = dict(poses)           # copy: the Gazebo callback updates poses in another thread
+                known_rooms = world_state.discover(known_rooms, robot_xy, sc["rooms"])
+                state = world_state.build_world_state(sc, known_rooms, robot_xy, switch_on, door_open,
+                                                      robot_info)
+            except NotImplementedError as e:
+                world_state_on = False
+                log(f"world state off: {e} is not written yet (scripts/world_state.py)")
+            except Exception:              # never let a world-state bug stop the gates
+                world_state_on = False
+                log("world state off after an error; switches and doors keep working:\n"
+                    + traceback.format_exc())
+            else:
+                structure = json.dumps({k: v for k, v in state.items() if k != "costs"})
+                full = json.dumps(state)
+                now = time.monotonic()
+                structure_changed = structure != last_structure
+                costs_changed = full != last_full and now - last_publish_time >= COSTS_ONLY_MIN_PERIOD_S
+                heartbeat_due = now - last_publish_time >= HEARTBEAT_PERIOD_S
+                if structure_changed or costs_changed or heartbeat_due:
+                    if publish_world_state:
+                        publish_world_state(full)
+                    last_full, last_publish_time = full, now
+                if structure_changed:
+                    last_structure = structure
+                summary = (sorted(known_rooms, key=world_state.id_key), [t["id"] for t in state["tasks"]])
+                if summary != last_summary:      # robot task/status changes are published, not logged
+                    last_summary = summary
+                    log(f"world state: rooms known {summary[0]}; tasks {summary[1]}")
 
         time.sleep(1.0 / RATE_HZ)
 

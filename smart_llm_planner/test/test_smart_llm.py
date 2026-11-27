@@ -55,6 +55,7 @@ def test_unreachable():
 def test_latched_switch_keeps_door_open():
     state = copy.deepcopy(STATE)
     state['switches'].append({'id': 'S2', 'color': 'blue', 'mode': 'latch', 'active': True})
+    state['doors'][0]['open_if'] = {'any_of': ['S1', 'S2']}   # S2 is known now, so it is listed
     state['doors'][0]['open'] = True
     assert validate_plan({'robot1': 'CROSS:D1', 'robot2': 'WAIT'}, state) == []
 

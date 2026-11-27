@@ -7,6 +7,12 @@
 #     reset_robots    put both robots back on their start circles
 #     setpose <robot> <x> <y>   teleport one robot, e.g.  setpose robot1 -1.1 -1.45
 #     drive_red / drive_blue    drive a robot with the keyboard (Ctrl+C to stop)
+#   With Nav2 and the executor running (run.sh --nav or --planner ...):
+#     send_plan robot1=HOLD:S1 robot2=CROSS:D1   send a plan by hand (WAIT for an idle robot)
+#     show_world_state / show_plan / show_status / show_mission  print /team/world_state,
+#                                                 /team/plan, /team/robot_status, /team/mission
+#   Don't use setpose or reset_robots while Nav2 runs: a teleported robot's odometry no longer
+#   matches its position, so Nav2 drives it to the wrong place.
 # Watch the run.sh terminal and the gate in Gazebo while these run.
 
 source /opt/ros/jazzy/setup.bash
@@ -65,4 +71,20 @@ drive_red()  { ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -
 # old: drive_blue() { ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/robot_blue/cmd_vel; }
 drive_blue() { ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/robot2/cmd_vel; }
 
-echo "test helpers loaded: test_a, test_b, reset_robots, setpose <robot> <x> <y>, drive_red, drive_blue"
+send_plan() {   # send_plan robot1=HOLD:S1 robot2=CROSS:D1: the same message a planner sends on /team/plan
+  local json
+  json=$(/usr/bin/python3 -c '
+import json, sys
+try:
+    print(json.dumps(dict(arg.split("=", 1) for arg in sys.argv[1:])))
+except ValueError:
+    sys.exit("usage: send_plan robot1=HOLD:S1 robot2=CROSS:D1   (WAIT for an idle robot)")' "$@") || return 1
+  ros2 topic pub --once -w 1 /team/plan std_msgs/msg/String "{data: '$json'}" > /dev/null && echo "sent $json"
+}
+show_world_state() { ros2 topic echo /team/world_state --once --field data; }
+show_status()      { ros2 topic echo /team/robot_status --once --field data; }
+show_plan()        { ros2 topic echo /team/plan --once --field data; }   # waits for the next plan
+show_mission()     { ros2 topic echo /team/mission --field data; }        # mission start/complete events
+
+echo "test helpers loaded: test_a, test_b, reset_robots, setpose <robot> <x> <y>, drive_red, drive_blue,"
+echo "                     send_plan robot1=<task> ..., show_world_state, show_plan, show_status, show_mission"

@@ -1,7 +1,7 @@
 # Escape-maze scenario: two robots, two hold switches, one gate.
 #   gz_world_name:   the <world name> in the SDF (used to read robot poses from Gazebo)
 #   on_pad_radius_m: a robot is ON a switch when its center is within this distance of the pad center
-#   Robot ids must match the model names used when spawning (robot_name:=robot_red, ...).
+#   Robot ids must match the model names used when spawning (robot_name:=robot1, ...).
 scenario:
   id: escape_maze_hold_handoff
   world: ../worlds/escape_maze.sdf
@@ -11,6 +11,15 @@ scenario:
 
 mission:
   goal: all_robots_reach_exit
+
+# Rooms use grid ids "row,col" (docs/communication_standards.md): row 1 is the
+# northernmost row, and columns count from west to east. North = +y, east = +x.
+# bounds: [x_min, y_min, x_max, y_max] in meters, the inside of the room.
+rooms:
+  - id: "1,1"
+    bounds: [-6.0, -2.5, 0.0, 2.5]
+  - id: "1,2"
+    bounds: [0.0, -2.5, 6.0, 2.5]
 
 robots:
   # - id: robot_red
@@ -42,6 +51,8 @@ doors:
     logic: any_of
     # requires: [S_R, S_B]
     requires: [S1, S2]
+    pose: [0.0, 0.0, 0.0]          # center of the doorway (used for path costs)
+    connects: ["1,1", "1,2"]       # the two rooms this door joins
     open_while_requirement_true: true
     closed_joint_position_m: 0.0
     open_joint_position_m: 1.3

@@ -1,0 +1,36 @@
+# Gazebo <-> ROS 2 topics of one TurtleBot3 (used by launch/spawn_robot.launch.py).
+# The same as nav2_minimal_tb3_sim's configs/turtlebot3_waffle_bridge.yaml, without /clock:
+# with one /clock bridge per robot, two clocks interleave and Nav2 sees time jump back
+# ("Detected jump back in time. Clearing TF buffer"). The single /clock bridge is started
+# with the first robot (bridge_clock:=true).
+# Topic names are relative, so each robot's bridge serves /<robot>/odom, /<robot>/scan, ...
+
+- topic_name: "joint_states"
+  ros_type_name: "sensor_msgs/msg/JointState"
+  gz_type_name: "gz.msgs.Model"
+  direction: GZ_TO_ROS
+
+- topic_name: "odom"
+  ros_type_name: "nav_msgs/msg/Odometry"
+  gz_type_name: "gz.msgs.Odometry"
+  direction: GZ_TO_ROS
+
+- topic_name: "tf"
+  ros_type_name: "tf2_msgs/msg/TFMessage"
+  gz_type_name: "gz.msgs.Pose_V"
+  direction: GZ_TO_ROS
+
+- topic_name: "imu"
+  ros_type_name: "sensor_msgs/msg/Imu"
+  gz_type_name: "gz.msgs.IMU"
+  direction: GZ_TO_ROS
+
+- topic_name: "scan"
+  ros_type_name: "sensor_msgs/msg/LaserScan"
+  gz_type_name: "gz.msgs.LaserScan"
+  direction: GZ_TO_ROS
+
+- topic_name: "cmd_vel"
+  ros_type_name: "geometry_msgs/msg/Twist"
+  gz_type_name: "gz.msgs.Twist"
+  direction: ROS_TO_GZ
