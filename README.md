@@ -137,9 +137,9 @@ The planners never see the true maze. They see only what the team has discovered
 |---|---|
 | Discovery | A room becomes known when a robot enters it, and stays known. Everything inside it (switches, the exit) becomes known with it |
 | Doors | A door is known when one of its rooms is known. Until the other room is entered, its `other_room` is `"UNKNOWN"` |
-| No leaks | A switch's `controls` and a door's `open_if` list only known doors and switches. `open_if` is `null` while none of the door's switches is known |
-| Tasks | `ACTIVATE:<S>` (latch, not yet on), `HOLD:<S>`, `CROSS:<D>` for every known door, and `EXIT` once the exit is known. Exploring a new room means crossing a door that leads to `UNKNOWN` |
-| Costs | Shortest path length (m) from each robot to each task's target on the known map, through open doors only. A missing entry means the target is unreachable now |
+| No leaks | A switch's `controls` and a door's `open_if` list only known doors and switches. `open_if` is `null` while the known switches can't open the door: none known (`any_of`), or not all known (`all_of`). It is also `null` for a door that needs no switch |
+| Tasks | `ACTIVATE:<S>` (latch, not yet on), `HOLD:<S>`, `CROSS:<D>` for every known door, and `EXIT` once the exit is known. Exploring a new room means crossing a door that leads to `UNKNOWN`. A `CROSS` task's `depends` lists the HOLD tasks that can keep its door open (`any_of`: any one is enough; `all_of`: all are needed). It is `null` if latched switches already keep the door open |
+| Costs | Shortest path length (m) from each robot to each task's target on the known map. A path goes **through** a door only if the door stays open with nobody standing on a switch (it needs no switch, or latched switches keep it open). A door that a robot holds open is reached only as the target of `CROSS:<D>`, which the planner must pair with a `HOLD`. A missing entry means the target is unreachable now |
 
 Message details:
 - **Type and format:** a `std_msgs/String` holding the JSON from `docs/communication_standards.md`, with the keys `rooms`, `robots`, `switches`, `doors`, `tasks` and `costs`.
@@ -147,7 +147,7 @@ Message details:
 - **QoS:** the publisher is transient-local. A node that subscribes with `durability=TRANSIENT_LOCAL` receives the latest state as soon as it starts.
 
 ```bash
-ros2 topic echo /team/world_state --once --qos-durability transient_local --field data
+ros2 topic echo /team/world_state --once --field data
 ```
 
 ## Planning and execution
@@ -161,7 +161,7 @@ switch manager --/team/world_state--> planner --/team/plan--> executor --Nav2 go
 | Topic | From -> to | Content (`std_msgs/String`, JSON) | QoS |
 |---|---|---|---|
 | `/team/world_state` | switch manager -> planners, executor | What the team knows (see above) | transient local, re-sent at least every 2 s |
-| `/team/plan` | planner -> executor | One task per robot, e.g. `{"robot1": "HOLD:S1", "robot2": "CROSS:D1"}`; `WAIT` for an idle robot | volatile |
+| `/team/plan` | planner -> executor | One task per robot, e.g. `{"robot1": "HOLD:S1", "robot2": "CROSS:D1"}`; `WAIT` for an idle robot | volatile. `run.sh` starts the executor before the planner; an executor started later gets the next plan (the baseline re-sends its plan every 5 s, SMART-LLM replans at least every 20 s) |
 | `/team/robot_status` | executor -> switch manager | Each robot's `task` and `status` (`ok` / `waiting`, `waiting_for`); they appear in the world state's `robots` | transient local, re-sent every 1 s |
 | `/team/planner_log` | planner -> logs | One record per planning call: assignments and reasons (SMART-LLM also logs each stage's output and timing) | volatile |
 
@@ -259,7 +259,7 @@ Watch Terminal A and the gate in Gazebo while the tests run.
 ### Rule self-test (no Gazebo)
 
 ```bash
-python3 scripts/switch_manager.py --selftest     # ends with: ALL PASS (16 checks)
+python3 scripts/switch_manager.py --selftest     # 17 checks; the last line is ALL PASS
 ```
 
 ### Executor and planner self-tests (no ROS or Gazebo)
@@ -273,7 +273,7 @@ cd smart_llm_planner && python3 -m pytest -q test && cd ..   # SMART-LLM planner
 ### World-state self-test (no Gazebo)
 
 ```bash
-python3 scripts/world_state.py --selftest   # ends with: ALL PASS (13 checks: discovery, no leaks, tasks, costs)
+python3 scripts/world_state.py --selftest   # 17 checks (discovery, no leaks, tasks, costs); the last line is ALL PASS
 python3 scripts/world_state.py --demo       # prints the JSON at the start and during the handoff
 ```
 
@@ -394,6 +394,7 @@ If you move a switch or the exit in the scenario, move its marker in `worlds/esc
 | `Errno::ESRCH` / `No such process` after repeated Ctrl+C | This can happen in Gazebo's shutdown handler when a process is already gone. Press Ctrl+C once and allow shutdown to finish; check earlier log messages for the startup failure |
 | Terminal A shows nothing after the first `world state:` line | Normal. It prints only when a switch, a door, the known rooms or the tasks change; move a robot onto a switch |
 | A planner receives no `/team/world_state` at startup | Subscribe with `durability=TRANSIENT_LOCAL` to get the latest state at once; otherwise the next one arrives within 2 s. Both ends need the same `ROS_DOMAIN_ID` |
+| `scenario problem: ...` and `world state off` at startup | Every door needs `pose` and `connects` (two room ids from `rooms`), and every switch and the exit must lie inside exactly one room. The gates still work; fix `config/scenario.yaml` and restart |
 | `waiting for robot poses: [...]` keeps printing | The spawn `robot_name` must match the robot `id` in the scenario, and `gz_world_name` must match `<world name>` in the SDF |
 | `a Gazebo world named 'escape_maze' is already running` | Close the other Gazebo first (or `pkill -f 'gz sim'`) |
 | `ModuleNotFoundError: No module named 'gz'` | Use the system `python3` (`/usr/bin/python3`), not a conda or venv Python |
