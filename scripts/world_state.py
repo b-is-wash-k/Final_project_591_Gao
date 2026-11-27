@@ -88,7 +88,8 @@ def known_view(sc, known_rooms, robot_xy, switch_on, door_open, robot_info):
       switches: known switches: {"id", "color", "mode", "active": switch_on[id],
                  "controls": first known door (by id) whose `requires` lists this switch, else None}
       doors:    known doors: {"id", "open": door_open[id],
-                 "open_if": {<door logic, e.g. "any_of">: [known switch ids from `requires`]}}
+                 "open_if": {<door logic, e.g. "any_of">: [known switch ids from `requires`]},
+                 or None while none of them is known (also for a door that needs no switch)}
     """
     all_room_ids = {room["id"] for room in sc["rooms"]}
     known_room_ids = set(known_rooms) & all_room_ids
@@ -211,9 +212,12 @@ def known_view(sc, known_rooms, robot_xy, switch_on, door_open, robot_info):
         door_view.append({
             "id": door["id"],
             "open": bool(door_open.get(door["id"], False)),
-            "open_if": {
-                door["logic"]: known_required_switches,
-            },
+            # None, not {"all_of": []}, while no controlling switch is known: an empty
+            # all_of list would read as "always open" to a planner or validator.
+            "open_if": (
+                {door["logic"]: known_required_switches}
+                if known_required_switches else None
+            ),
         })
 
     return {
@@ -272,7 +276,7 @@ def make_tasks(view):
     for door in sorted(view["doors"], key=lambda door: door["id"]):
         required_ids = {
             switch_id
-            for switch_ids in door["open_if"].values()
+            for switch_ids in (door["open_if"] or {}).values()
             for switch_id in switch_ids
         }
 
@@ -606,6 +610,16 @@ def selftest():
         leaks = [word for word in ("S2", "1,2", "EXIT") if word in text]
         return f"hidden things appear at t = 0: {leaks}" if leaks else None
     check("A: no leak (no S2, no room 1,2, no EXIT at t = 0)", no_leak_at_t0)
+
+    def open_if_none_while_no_switch_known():
+        # D1 needs S2 only, and S2 is in the unknown room 1,2: D1 is known, its switch is not.
+        sc2 = {**sc, "switches": [s for s in sc["switches"] if s["id"] == "S2"],
+               "doors": [{**sc["doors"][0], "logic": "all_of", "requires": ["S2"]}]}
+        state = build_world_state(sc2, **SITUATION_A)
+        cross = next(t for t in state["tasks"] if t["id"] == "CROSS:D1")
+        return (expect(state["doors"], [{"id": "D1", "open": False, "open_if": None}])
+                or expect(cross["depends"], None))
+    check("open_if is None while none of the door's switches is known", open_if_none_while_no_switch_known)
 
     print("ALL PASS" if bad == 0 else f"{bad} FAILED")
     return bad == 0

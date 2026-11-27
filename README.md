@@ -117,7 +117,7 @@ The planners never see the true maze. They see only what the team has discovered
 |---|---|
 | Discovery | A room becomes known when a robot enters it, and stays known. Everything inside it (switches, the exit) becomes known with it |
 | Doors | A door is known when one of its rooms is known. Until the other room is entered, its `other_room` is `"UNKNOWN"` |
-| No leaks | A switch's `controls` and a door's `open_if` list only known doors and switches |
+| No leaks | A switch's `controls` and a door's `open_if` list only known doors and switches. `open_if` is `null` while none of the door's switches is known |
 | Tasks | `ACTIVATE:<S>` (latch, not yet on), `HOLD:<S>`, `CROSS:<D>` for every known door, and `EXIT` once the exit is known. Exploring a new room means crossing a door that leads to `UNKNOWN` |
 | Costs | Shortest path length (m) from each robot to each task's target on the known map, through open doors only. A missing entry means the target is unreachable now |
 
@@ -175,7 +175,7 @@ python3 scripts/switch_manager.py --selftest     # ends with: ALL PASS (13 check
 ### World-state self-test (no Gazebo)
 
 ```bash
-python3 scripts/world_state.py --selftest   # ends with: ALL PASS (12 checks: discovery, no leaks, tasks, costs)
+python3 scripts/world_state.py --selftest   # ends with: ALL PASS (13 checks: discovery, no leaks, tasks, costs)
 python3 scripts/world_state.py --demo       # prints the JSON at the start and during the handoff
 ```
 
