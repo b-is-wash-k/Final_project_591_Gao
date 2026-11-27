@@ -149,3 +149,11 @@ Everything below is just a proposal, so feel free to make changes as long as we'
 * Robots are numbered, e.g. robot1, robot2, etc.
 * Tasks are named according to Table 1 in the proposal.
 * Rooms are named based on a 2D grid, going W-E and N-S. 1,1 is the room in the NW corner, 1,2 is the room due east of it, and so on.
+
+# Notes from the implementation
+These follow from how the simulator reveals the maze (see the world-state PR #4). Where they differ from the examples above, these notes apply.
+* **Exploring:** a room becomes known as soon as a robot enters it, and everything in it is revealed at once. So exploring is `CROSS:<door>` for a door whose `other_room` is `"UNKNOWN"`. The `EXPLORE` tasks in the example above are not generated: a room nobody has entered can't be named without revealing it.
+* **`open_if`:** lists only switches the team has found. It is `null` while the found switches can't open the door: none found (`any_of`), or not all found (`all_of`). It is also `null` for a door that needs no switch. When it is `null`, use the door's `open` flag.
+* **`depends` (CROSS):** the HOLD tasks that can keep the door open. For `any_of` one of them is enough; for `all_of` all are needed. It is `null` when latched switches already keep the door open.
+* **Costs:** a path never goes through a door that is open only because a robot holds a switch. The way past such a door is `CROSS:<door>` (paired with the `HOLD`).
+* **Robot `status` and `task`:** reported by the executor (executor PR); until then they are `ok` and `null`. When a robot finishes its task, its `task` goes back to `null`.
