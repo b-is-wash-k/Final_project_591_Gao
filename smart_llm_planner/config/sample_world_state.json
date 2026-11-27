@@ -18,7 +18,7 @@
     {"id": "S1", "color": "red", "mode": "hold", "active": false, "controls": "D1"}
   ],
   "doors": [
-    {"id": "D1", "open": false, "open_if": {"any_of": ["S1", "S2"]}}
+    {"id": "D1", "open": false, "open_if": {"any_of": ["S1"]}}
   ],
   "tasks": [
     {"id": "HOLD:S1", "type": "HOLD", "target": "S1", "needs_color": "red",
