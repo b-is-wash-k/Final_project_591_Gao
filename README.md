@@ -6,6 +6,7 @@ A Gazebo Harmonic + ROS 2 Jazzy simulation of a two-room escape maze for multi-r
 - **Switches:** colored floor switches. A switch reacts only to a robot of its own color.
 - **Gate:** a lift gate between the two rooms opens while a matching robot holds one of the switches.
 - **Goal:** the robots must cooperate (one holds a switch while the other crosses) to reach the exit.
+- **Autonomy:** a planner (rule-based baseline or SMART-LLM) assigns one task per robot, and an executor drives each robot with Nav2.
 
 ![Maze overview: two rooms, lift gate, red and blue switches, exit](docs/maze_overview.png)
 
@@ -26,8 +27,13 @@ The robots are moved onto the switches with Gazebo's move tool. When a robot sta
 - **Scenario file:** `config/scenario.yaml`. It is the single place that defines the robots and their colors, switches (color, `hold`/`latch`, position), door rules (`any_of`/`all_of`), the exit and what the robots know at the start.
 - **Switch manager:** `scripts/switch_manager.py`. It reads the robots' true positions from Gazebo, applies the switch and door rules, and opens or closes the gate. It includes a self-test for the rules that runs without Gazebo.
 - **World state for the planners:** `scripts/world_state.py`. The switch manager uses it to publish what the team knows (rooms, robots, switches, doors, tasks and path costs) as JSON on `/team/world_state`, in the format of `docs/communication_standards.md`.
-- **One-command launcher:** `scripts/run.sh`. It starts Gazebo, spawns the robots from the scenario file and starts the switch manager.
-- **Test helpers:** `scripts/test_helpers.sh`. Ready-made test sequences, robot teleport and keyboard driving.
+- **Navigation:** `launch/navigation.launch.py` with `config/nav2_params.yaml`. Nav2 for every robot in the scenario, each in its own namespace (`/robot1/navigate_to_pose`, ...).
+- **Executor:** `scripts/executor.py`. Turns each robot's task from `/team/plan` into Nav2 goals and reports each robot's task and status on `/team/robot_status`.
+- **Planners:** both publish `/team/plan` from `/team/world_state`, so either one drives the same executor.
+  - `scripts/baseline_planner.py`: a small rule-based (greedy) planner, a stand-in for the conventional planner.
+  - `smart_llm_planner/`: the SMART-LLM planner (Gemini), a ROS 2 package with its own tests.
+- **One-command launcher:** `scripts/run.sh`. It starts Gazebo, spawns the robots from the scenario file and starts the switch manager; with `--planner` also Nav2, the executor and a planner.
+- **Test helpers:** `scripts/test_helpers.sh`. Ready-made test sequences, robot teleport, keyboard driving and hand-written plans.
 
 ## Requirements
 
@@ -35,8 +41,15 @@ The robots are moved onto the switches with Gazebo's move tool. When a robot sta
 - Packages:
 
 ```bash
-sudo apt install ros-jazzy-ros-gz ros-jazzy-nav2-minimal-tb3-sim ros-jazzy-teleop-twist-keyboard \
-                 python3-gz-transport13 python3-gz-msgs10 python3-yaml
+sudo apt install ros-jazzy-ros-gz ros-jazzy-nav2-minimal-tb3-sim ros-jazzy-navigation2 \
+                 ros-jazzy-teleop-twist-keyboard python3-gz-transport13 python3-gz-msgs10 python3-yaml
+```
+
+- **SMART-LLM planner only:** the Gemini library and an API key.
+
+```bash
+/usr/bin/python3 -m pip install --user --break-system-packages google-genai   # installs into ~/.local only
+export GEMINI_API_KEY=<your key>     # in the terminal that runs run.sh; never commit a key
 ```
 
 The scripts use the system Python (`/usr/bin/python3`), which has the Gazebo Python bindings.
@@ -46,16 +59,23 @@ The scripts use the system Python (`/usr/bin/python3`), which has the Gazebo Pyt
 ```
 .
 ├── config/
-│   └── scenario.yaml          # robots, switches, door rules, exit
+│   ├── scenario.yaml          # robots, switches, door rules, exit
+│   └── nav2_params.yaml       # Nav2 parameters for one robot
 ├── docs/
+│   ├── communication_standards.md  # world-state and plan formats, naming
 │   ├── maze_overview.png      # screenshot of the maze
 │   ├── gate_demo.gif          # demo animation (plays in this README)
 │   └── gate_demo.mp4          # full demo video
+├── launch/
+│   └── navigation.launch.py   # Nav2 for every robot in the scenario
 ├── scripts/
 │   ├── run.sh                 # start everything with one command
 │   ├── switch_manager.py      # switch and door logic (+ --selftest)
 │   ├── world_state.py         # world state for the planners (+ --selftest, --demo)
-│   └── test_helpers.sh        # test_a, test_b, setpose, drive_red, drive_blue
+│   ├── executor.py            # /team/plan -> Nav2 goals (+ --selftest)
+│   ├── baseline_planner.py    # rule-based planner (+ --selftest)
+│   └── test_helpers.sh        # test_a, test_b, setpose, drive_red, drive_blue, send_plan
+├── smart_llm_planner/         # SMART-LLM planner (ROS 2 package, Gemini)
 ├── worlds/
 │   └── escape_maze.sdf        # the Gazebo world
 ├── CONTRIBUTING.md            # team Git workflow
@@ -130,20 +150,90 @@ Message details:
 ros2 topic echo /team/world_state --once --qos-durability transient_local --field data
 ```
 
+## Planning and execution
+
+```
+switch manager --/team/world_state--> planner --/team/plan--> executor --Nav2 goals--> robots
+      ^                                                          |
+      +------------------------/team/robot_status----------------+
+```
+
+| Topic | From -> to | Content (`std_msgs/String`, JSON) | QoS |
+|---|---|---|---|
+| `/team/world_state` | switch manager -> planners, executor | What the team knows (see above) | transient local, re-sent at least every 2 s |
+| `/team/plan` | planner -> executor | One task per robot, e.g. `{"robot1": "HOLD:S1", "robot2": "CROSS:D1"}`; `WAIT` for an idle robot | volatile |
+| `/team/robot_status` | executor -> switch manager | Each robot's `task` and `status` (`ok` / `waiting`, `waiting_for`); they appear in the world state's `robots` | transient local, re-sent every 1 s |
+| `/team/planner_log` | planner -> logs | One record per planning call: assignments and reasons (SMART-LLM also logs each stage's output and timing) | volatile |
+
+**What the executor does with each task:**
+
+| Task | The robot | Done when |
+|---|---|---|
+| `ACTIVATE:<S>` | drives onto the switch pad | the switch is on |
+| `HOLD:<S>` | drives onto the pad and stays | never; the planner gives it another task |
+| `CROSS:<D>` | drives through the door into the room on the other side. If the door is closed, it waits in front of it with status `waiting` until it opens. Works the same when the other side is `UNKNOWN` (exploring) | its center is 0.6 m past the door |
+| `EXIT` | parks next to the exit, keeping clear of other robots | it is there |
+| `WAIT` | stops | |
+
+- **Done:** when a task is done, the robot's `task` goes back to `null`, which tells the planner to replan.
+- **Repeats:** a task that is sent again keeps the current goal, and a finished task that is sent again is ignored.
+- **Safety:** a robot holding a switch does not leave it while another robot is in the opening of a door that the switch alone keeps open, whatever the plan says; it takes its next task once the doorway is clear.
+- **Geometry:** the executor drives the real robots, so it uses the true door and room geometry from `config/scenario.yaml`. The planners only see the world state.
+
+**Navigation:** Nav2 runs once per robot, in the robot's namespace. There is no map server and no AMCL:
+- **Localization:** a fixed transform `map -> odom` (the robot's start pose) plus wheel odometry. The `map` frame is the Gazebo world frame.
+- **Costmaps:** built from each robot's own LiDAR. Space nobody has scanned yet counts as free, so a path can lead into an unexplored room. A closed gate is seen and blocks the path; a lifted gate does not.
+
+**Planners:**
+- **`--planner conventional`:** `scripts/baseline_planner.py`, a small rule-based planner and a stand-in for the team's conventional planner. Each robot heads for the first door on its route to the exit room (or, while the exit is unknown, the nearest door to an `UNKNOWN` room). Free robots of the right color are sent to that door's switches, and a robot holding a door open keeps holding it until another switch takes over (the handoff). Its plans follow the same rules as the SMART-LLM validator: every robot gets a task, one robot per task except `EXIT`/`WAIT`, colors match, and every crossed door is kept open by the plan.
+- **`--planner smart_llm`:** `smart_llm_planner/` (SMART-LLM with Gemini). It needs `GEMINI_API_KEY` and the `google-genai` library (see Requirements); `run.sh` checks both before it starts anything.
+
 ## Quick start
 
 **Terminal A: start everything.** Ctrl+C stops it all.
 
 ```bash
 cd escape_maze_gazebo                 # the repository root
-./scripts/run.sh                      # with the Gazebo window
+./scripts/run.sh                      # with the Gazebo window; move the robots yourself
 ./scripts/run.sh --headless           # or: without a window
 ```
 
-`run.sh` does three things, then shows the switch manager's output:
-1. Starts Gazebo with the maze.
-2. Spawns every robot from `config/scenario.yaml` at its start position, waiting until each robot is in Gazebo.
-3. Starts the switch manager.
+**The robots solve the maze on their own.** Pick a planner:
+
+```bash
+./scripts/run.sh --planner conventional      # rule-based baseline planner
+export GEMINI_API_KEY=<your key>
+./scripts/run.sh --planner smart_llm         # SMART-LLM planner (Gemini)
+./scripts/run.sh --nav                       # Nav2 + executor only; send plans by hand (send_plan)
+```
+
+Add `--headless` to any of these to run without a window.
+
+`run.sh` starts these, then shows their output:
+1. Gazebo with the maze.
+2. Every robot from `config/scenario.yaml` at its start position, waiting until each robot is in Gazebo.
+3. The switch manager.
+4. With `--planner` or `--nav`: Nav2 for every robot (waiting until it is active), then the executor (lines start with `[executor]`).
+5. With `--planner`: the planner (lines start with `[planner]`).
+
+With `--planner conventional` on the default scenario, a run looks like this (times will differ; about one minute from the first plan to both robots at the exit):
+
+```
+[planner] plan: robot1 HOLD:S1 (opens D1 for robot2), robot2 CROSS:D1 (crosses D1 once it opens)
+[  22.53s] switch S1 (red hold) -> ON
+[  22.53s] door D1 -> OPEN
+[  28.76s] world state: rooms known ['1,1', '1,2']; tasks ['HOLD:S1', 'HOLD:S2', 'CROSS:D1', 'EXIT']
+[executor] robot2: CROSS:D1 done
+[planner] plan: robot1 HOLD:S1 (holds S1 until another switch keeps D1 open, then crosses), robot2 HOLD:S2 (opens D1 for robot1)
+[  39.53s] switch S2 (blue hold) -> ON
+[planner] plan: robot1 CROSS:D1 (D1 is open), robot2 HOLD:S2 (keeps D1 open for robot1)
+[  42.75s] switch S1 (red hold) -> OFF
+[executor] robot1: CROSS:D1 done
+[planner] plan: robot1 EXIT (in the exit room), robot2 EXIT (in the exit room)
+[  53.21s] switch S2 (blue hold) -> OFF
+[  53.21s] door D1 -> CLOSED
+[executor] all robots are at the exit
+```
 
 Each run's logs are saved in `logs/run_<date>_<time>/`.
 
@@ -169,7 +259,15 @@ Watch Terminal A and the gate in Gazebo while the tests run.
 ### Rule self-test (no Gazebo)
 
 ```bash
-python3 scripts/switch_manager.py --selftest     # ends with: ALL PASS (13 checks)
+python3 scripts/switch_manager.py --selftest     # ends with: ALL PASS (16 checks)
+```
+
+### Executor and planner self-tests (no ROS or Gazebo)
+
+```bash
+python3 scripts/executor.py --selftest           # task ids, crossing, waiting, holder safety, exit spots
+python3 scripts/baseline_planner.py --selftest   # the handoff step by step, and special cases
+cd smart_llm_planner && python3 -m pytest -q test && cd ..   # SMART-LLM planner (no API key needed)
 ```
 
 ### World-state self-test (no Gazebo)
@@ -220,6 +318,17 @@ drive_blue                        # drive the blue robot
 
 `setpose` teleports a robot, which is useful for testing the switch logic. To show a real crossing, open the gate (red on `S1`) and drive blue through it with `drive_blue`.
 
+With Nav2 and the executor running (`run.sh --nav` or `--planner ...`):
+
+```bash
+send_plan robot1=HOLD:S1 robot2=CROSS:D1   # the same message a planner sends on /team/plan
+show_world_state                           # latest /team/world_state
+show_status                                # latest /team/robot_status
+show_plan                                  # the next /team/plan
+```
+
+Don't teleport robots (`setpose`, `reset_robots`, Gazebo's move tool) while Nav2 runs: odometry doesn't follow a teleport, so Nav2 would drive the robot to the wrong place.
+
 ## Running each part manually
 
 The same as `run.sh`, one terminal per part. Run every terminal from the repository root.
@@ -244,6 +353,16 @@ ros2 launch nav2_minimal_tb3_sim spawn_tb3.launch.py namespace:=robot2 robot_nam
 # Terminal 4: switch manager
 export GZ_IP=127.0.0.1
 python3 scripts/switch_manager.py config/scenario.yaml
+```
+
+Navigation, executor and planner (each in its own terminal, after `source /opt/ros/jazzy/setup.bash`):
+
+```bash
+ros2 launch launch/navigation.launch.py scenario:=config/scenario.yaml   # wait for "Managed nodes are active" per robot
+python3 scripts/executor.py config/scenario.yaml
+python3 scripts/baseline_planner.py                                       # or the SMART-LLM planner:
+PYTHONPATH=$PWD/smart_llm_planner python3 -m smart_llm_planner.planner_node \
+    --ros-args --params-file smart_llm_planner/config/smart_llm_planner.yaml
 ```
 
 To move the gate by hand, run this with the switch manager **stopped**; otherwise it overrides the command 10 times per second:
@@ -281,6 +400,11 @@ If you move a switch or the exit in the scenario, move its marker in `worlds/esc
 | Robots appear without meshes | Run the `export GZ_SIM_RESOURCE_PATH=...` line before `gz sim` |
 | `setpose: command not found` | Run `source scripts/test_helpers.sh` in that terminal first |
 | A robot on a switch does nothing | Check the colors: red presses only `S1` (−1.1, −1.45); blue presses only `S2` (1.1, 1.45) |
+| `timed out ... waiting for Nav2 to become active` | Check `logs/run_.../navigation.log`. Nav2 needs the robots' odometry and LiDAR from the spawn bridge, so look in `spawn_<robot>.log` too |
+| ROS 2 nodes don't receive each other's messages (planner gets no world state, executor gets no plan) | All terminals need the same `ROS_DOMAIN_ID`. On machines with VPN or virtual network interfaces, also run `export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST` in every terminal |
+| `--planner smart_llm needs a Gemini API key` / `needs the Gemini library` | See Requirements. Set the key with `export GEMINI_API_KEY=...` in the terminal; never write it into a file in the repository |
+| A robot drives to the wrong place after a teleport | Odometry doesn't follow teleports. Restart `run.sh` and don't teleport while Nav2 runs |
+| A robot waits in front of a closed door (`waiting at closed D1`) | Normal: the plan asks it to cross, and the door opens once another robot holds a switch. If no plan does that, the planner has no way to open it yet |
 
 ## Contributing
 
