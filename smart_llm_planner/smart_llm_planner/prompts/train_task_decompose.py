@@ -10,8 +10,8 @@ doors = [
     {'id': 'D2', 'open': True, 'open_if': None},
 ]
 tasks = [
-    {'id': 'CROSS:D1', 'type': 'CROSS', 'target': 'D1', 'depends': None},
-    {'id': 'CROSS:D2', 'type': 'CROSS', 'target': 'D2', 'depends': None},
+    {'id': 'CROSS:D1', 'type': 'CROSS', 'target': 'D1'},
+    {'id': 'CROSS:D2', 'type': 'CROSS', 'target': 'D2'},
 ]
 
 # GENERAL TASK DECOMPOSITION
@@ -61,7 +61,7 @@ doors = [
 tasks = [
     {'id': 'ACTIVATE:S2', 'type': 'ACTIVATE', 'target': 'S2', 'needs_color': 'red', 'enables': 'CROSS:D2'},
     {'id': 'ACTIVATE:S3', 'type': 'ACTIVATE', 'target': 'S3', 'needs_color': 'blue', 'enables': 'CROSS:D2'},
-    {'id': 'CROSS:D2', 'type': 'CROSS', 'target': 'D2', 'depends': ['ACTIVATE:S2', 'ACTIVATE:S3']},
+    {'id': 'CROSS:D2', 'type': 'CROSS', 'target': 'D2'},
 ]
 
 # GENERAL TASK DECOMPOSITION
@@ -116,7 +116,7 @@ doors = [
 tasks = [
     {'id': 'HOLD:S4', 'type': 'HOLD', 'target': 'S4', 'needs_color': 'red', 'enables': 'CROSS:D3'},
     {'id': 'CROSS:D3', 'type': 'CROSS', 'target': 'D3', 'depends': ['HOLD:S4']},
-    {'id': 'CROSS:D4', 'type': 'CROSS', 'target': 'D4', 'depends': None},
+    {'id': 'CROSS:D4', 'type': 'CROSS', 'target': 'D4'},
 ]
 
 # GENERAL TASK DECOMPOSITION
@@ -173,11 +173,13 @@ doors = [
     {'id': 'D5', 'open': True, 'open_if': {'any_of': ['S6']}},
 ]
 tasks = [
+    {'id': 'CROSS:D5', 'type': 'CROSS', 'target': 'D5'},
     {'id': 'EXIT', 'type': 'EXIT', 'target': '1,2'},
 ]
 
 # GENERAL TASK DECOMPOSITION
-# The exit is in room 1,2 and every robot is already in room 1,2. Nothing blocks the way.
+# The exit is in room 1,2 and every robot is already in room 1,2. Nothing blocks the way,
+# and nobody needs to go back through D5.
 # Independent subtasks:
 # SubTask 1: Every working robot goes to the exit. (Skills: EXIT)
 # Order: SubTask 1 for all robots at once.

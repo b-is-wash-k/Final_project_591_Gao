@@ -14,7 +14,11 @@ from skills import ACTIVATE, HOLD, CROSS, EXIT, WAIT
 
 # Door rules:  'open_if': {'any_of': [...]} -> open while at least one listed switch is ON
 #              'open_if': {'all_of': [...]} -> open while every listed switch is ON
-#              'open_if': None              -> no switch that opens it has been found yet; use 'open'
+#              'open_if': None              -> the switches found so far can't open it (none found, or for
+#                                              all_of not all found), or it needs no switch; use 'open'
+# A CROSS task's 'depends' lists the HOLD tasks that can keep its door open: for any_of ONE of them
+# is enough, for all_of ALL are needed. It is left out when latched switches already keep the door open.
+# Costs never lead through a door that a robot is holding open: get past it with CROSS first.
 # Task ids are written SKILL:TARGET, e.g. 'ACTIVATE:S2', 'HOLD:S1', 'CROSS:D1', plus 'EXIT' and 'WAIT'.
 # Rooms behind a door to 'UNKNOWN' have no name yet; explore them with CROSS:<door>.
 # costs[robot][task] is the path length in meters on the known map. A missing entry means unreachable.

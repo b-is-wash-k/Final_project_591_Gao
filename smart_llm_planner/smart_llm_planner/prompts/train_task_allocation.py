@@ -58,7 +58,7 @@ tasks = ['HOLD:S4', 'CROSS:D3', 'CROSS:D4']
 
 # ============================================================== EXAMPLE 4 ==
 robots = ['robot1', 'robot2', 'robot3']
-tasks = ['EXIT']
+tasks = ['CROSS:D5', 'EXIT']
 # SOLUTION
 # For SubTask 1 (EXIT) assign robot1 and robot2.
 # robot3 is broken and waits until it is repaired.

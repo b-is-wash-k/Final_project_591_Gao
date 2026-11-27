@@ -55,7 +55,10 @@ class PlannerNode(Node):
         self.plan_pub = self.create_publisher(String, p['plan_topic'], 10)
         self.log_pub = self.create_publisher(String, p['log_topic'], 10)
         # Transient local: the world-state publisher keeps its latest message, so a planner
-        # started after it still receives the current state at once.
+        # started after it still receives the current state at once. A publisher must then be
+        # transient-local too (a volatile one is QoS-incompatible and delivers nothing); for a
+        # hand-made test state:  ros2 topic pub --qos-durability transient_local
+        #                          --qos-reliability reliable /team/world_state std_msgs/msg/String ...
         world_state_qos = QoSProfile(depth=10, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(String, p['world_state_topic'], self.on_world_state, world_state_qos)
         self.create_timer(1.0, self.on_timer)

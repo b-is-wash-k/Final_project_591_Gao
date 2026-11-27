@@ -91,9 +91,9 @@ robots = [
     {'id': 'robot3', 'colors': ['red'], 'status': {'type': 'broken', 'repair_time': 30}, 'task': None},
 ]
 costs = {
-    'robot1': {'EXIT': 3.0},
-    'robot2': {'EXIT': 1.0},
-    'robot3': {'EXIT': 4.0},
+    'robot1': {'CROSS:D5': 2.5, 'EXIT': 3.0},
+    'robot2': {'CROSS:D5': 4.0, 'EXIT': 1.0},
+    'robot3': {'CROSS:D5': 1.5, 'EXIT': 4.0},
 }
 # GENERAL TASK DECOMPOSITION
 # Independent subtasks:
