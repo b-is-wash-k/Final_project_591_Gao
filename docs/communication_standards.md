@@ -149,3 +149,8 @@ Everything below is just a proposal, so feel free to make changes as long as we'
 * Robots are numbered, e.g. robot1, robot2, etc.
 * Tasks are named according to Table 1 in the proposal.
 * Rooms are named based on a 2D grid, going W-E and N-S. 1,1 is the room in the NW corner, 1,2 is the room due east of it, and so on.
+# Notes from the implementation
+These follow from how the simulator reveals the maze; see the world-state PR (#4) for details.
+* **Exploring:** a room becomes known as soon as a robot enters it, and everything in it is revealed at once. So exploring is `CROSS:<door>` for a door whose `other_room` is `"UNKNOWN"`, and no separate `EXPLORE` task is generated. A room nobody has entered can't be named without revealing it.
+* **`open_if`:** it lists only switches the team has found. It is `null` while none of the door's switches has been found (and for a door that needs no switch); then use the door's `open` flag.
+* **Robot `status` and `task`:** reported by the executor. When a robot finishes its task, its `task` goes back to `null`.

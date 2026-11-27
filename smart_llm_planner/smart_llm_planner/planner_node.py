@@ -22,6 +22,7 @@ import time
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from std_msgs.msg import String
 
 from smart_llm_planner.llm_client import API_KEY_PLACEHOLDER, LLMClient
@@ -53,7 +54,10 @@ class PlannerNode(Node):
 
         self.plan_pub = self.create_publisher(String, p['plan_topic'], 10)
         self.log_pub = self.create_publisher(String, p['log_topic'], 10)
-        self.create_subscription(String, p['world_state_topic'], self.on_world_state, 10)
+        # Transient local: the world-state publisher keeps its latest message, so a planner
+        # started after it still receives the current state at once.
+        world_state_qos = QoSProfile(depth=10, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(String, p['world_state_topic'], self.on_world_state, world_state_qos)
         self.create_timer(1.0, self.on_timer)
 
         self._lock = threading.Lock()

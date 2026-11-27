@@ -13,15 +13,16 @@
 
 # ============================================================== EXAMPLE 1 ==
 robots = ['robot1', 'robot2']
-tasks = ['EXPLORE:1,2', 'EXPLORE:2,1']
+tasks = ['CROSS:D1', 'CROSS:D2']
 # SOLUTION
-# For SubTask 1 (EXPLORE 1,2) assign robot1.
-# For SubTask 2 (EXPLORE 2,1) assign robot2.
+# For SubTask 1 (CROSS D1, explores the room behind it) assign robot1.
+# For SubTask 2 (CROSS D2, explores the room behind it) assign robot2.
 # No robot teams are needed.
 
 # ALLOCATION
-{"assignments": {"robot1": "EXPLORE:1,2", "robot2": "EXPLORE:2,1"},
- "reasons": {"robot1": "SubTask 1; closest to room 1,2", "robot2": "SubTask 2; closest to room 2,1"}}
+{"assignments": {"robot1": "CROSS:D1", "robot2": "CROSS:D2"},
+ "reasons": {"robot1": "SubTask 1; closest to D1, explores behind it",
+             "robot2": "SubTask 2; closest to D2, explores behind it"}}
 
 
 # ============================================================== EXAMPLE 2 ==
@@ -41,18 +42,18 @@ tasks = ['ACTIVATE:S2', 'ACTIVATE:S3', 'CROSS:D2']
 
 # ============================================================== EXAMPLE 3 ==
 robots = ['robot1', 'robot2', 'robot3']
-tasks = ['HOLD:S4', 'CROSS:D3', 'EXPLORE:2,1']
+tasks = ['HOLD:S4', 'CROSS:D3', 'CROSS:D4']
 # SOLUTION
 # For SubTask 1 (HOLD S4, red) assign robot1.
 # For SubTask 2 (CROSS D3) assign robot2.
-# For SubTask 3 (EXPLORE 2,1) assign robot3.
+# For SubTask 3 (CROSS D4, explores the room behind it) assign robot3.
 # Team: robot1 (HOLD S4) + robot2 (CROSS D3). robot1 keeps holding until robot2 is through D3.
 
 # ALLOCATION
-{"assignments": {"robot1": "HOLD:S4", "robot2": "CROSS:D3", "robot3": "EXPLORE:2,1"},
+{"assignments": {"robot1": "HOLD:S4", "robot2": "CROSS:D3", "robot3": "CROSS:D4"},
  "reasons": {"robot1": "SubTask 1; only red robot, holds D3 open",
              "robot2": "SubTask 2; crosses while robot1 holds S4",
-             "robot3": "SubTask 3; free and closest to room 2,1"}}
+             "robot3": "SubTask 3; free and closest to D4, explores behind it"}}
 
 
 # ============================================================== EXAMPLE 4 ==

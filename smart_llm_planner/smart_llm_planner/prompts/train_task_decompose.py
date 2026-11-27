@@ -10,32 +10,33 @@ doors = [
     {'id': 'D2', 'open': True, 'open_if': None},
 ]
 tasks = [
-    {'id': 'EXPLORE:1,2', 'type': 'EXPLORE', 'target': '1,2'},
-    {'id': 'EXPLORE:2,1', 'type': 'EXPLORE', 'target': '2,1'},
+    {'id': 'CROSS:D1', 'type': 'CROSS', 'target': 'D1', 'depends': None},
+    {'id': 'CROSS:D2', 'type': 'CROSS', 'target': 'D2', 'depends': None},
 ]
 
 # GENERAL TASK DECOMPOSITION
 # The exit is not known yet, so the team must explore first.
-# D1 and D2 are open and lead to two different unexplored rooms.
+# D1 and D2 are open and lead to UNKNOWN rooms. Crossing a door into an UNKNOWN room
+# explores that room: its switches, doors and exit become known.
 # Independent subtasks:
-# SubTask 1: Explore room 1,2. (Skills: EXPLORE)
-# SubTask 2: Explore room 2,1. (Skills: EXPLORE)
+# SubTask 1: Cross D1 to explore the room behind it. (Skills: CROSS)
+# SubTask 2: Cross D2 to explore the room behind it. (Skills: CROSS)
 # Order: SubTask 1 and SubTask 2 in parallel. Replan when something new is found.
 
 # CODE
-def explore_room_1_2():
-    # 0: SubTask 1: Explore room 1,2
-    # 1: Drive into room 1,2 and reveal it.
-    EXPLORE('1,2')
+def explore_behind_d1():
+    # 0: SubTask 1: Cross D1 to explore the room behind it
+    # 1: Drive through D1 into the unknown room and reveal it.
+    CROSS('D1')
 
-def explore_room_2_1():
-    # 0: SubTask 2: Explore room 2,1
-    # 1: Drive into room 2,1 and reveal it.
-    EXPLORE('2,1')
+def explore_behind_d2():
+    # 0: SubTask 2: Cross D2 to explore the room behind it
+    # 1: Drive through D2 into the unknown room and reveal it.
+    CROSS('D2')
 
 # Parallelize SubTask 1 and SubTask 2
-t1 = threading.Thread(target=explore_room_1_2)
-t2 = threading.Thread(target=explore_room_2_1)
+t1 = threading.Thread(target=explore_behind_d1)
+t2 = threading.Thread(target=explore_behind_d2)
 # Start executing SubTask 1 and SubTask 2 in parallel
 t1.start()
 t2.start()
@@ -109,24 +110,24 @@ switches = [
     {'id': 'S4', 'color': 'red', 'mode': 'hold', 'active': False, 'controls': 'D3'},
 ]
 doors = [
-    {'id': 'D3', 'open': False, 'open_if': {'any_of': ['S4', 'S5']}},
+    {'id': 'D3', 'open': False, 'open_if': {'any_of': ['S4']}},
     {'id': 'D4', 'open': True, 'open_if': None},
 ]
 tasks = [
     {'id': 'HOLD:S4', 'type': 'HOLD', 'target': 'S4', 'needs_color': 'red', 'enables': 'CROSS:D3'},
     {'id': 'CROSS:D3', 'type': 'CROSS', 'target': 'D3', 'depends': ['HOLD:S4']},
-    {'id': 'EXPLORE:2,1', 'type': 'EXPLORE', 'target': '2,1'},
+    {'id': 'CROSS:D4', 'type': 'CROSS', 'target': 'D4', 'depends': None},
 ]
 
 # GENERAL TASK DECOMPOSITION
-# D3 opens while S4 OR S5 is ON (any_of). S5 has not been found yet.
+# D3 opens while S4 is ON (any_of). Other switches for D3 may be in rooms not found yet.
 # S4 is a hold switch: D3 is open only while a robot stands on S4, so the holder cannot cross D3 itself.
-# A robot that crosses D3 should look for S5 on the far side; S5 could later hold D3 open for the holder.
-# D4 is open and leads to unexplored room 2,1, which may contain S5 or the exit.
+# A robot that crosses D3 explores the room behind it; a switch found there could later hold D3 open for the holder.
+# D4 is open and leads to an UNKNOWN room, which may contain the exit. Crossing D4 explores that room.
 # Independent subtasks:
 # SubTask 1: Hold red hold switch S4 to open D3. (Skills: HOLD, color red) Keep holding until SubTask 2 is done.
 # SubTask 2: Cross D3 while S4 is held. (Skills: CROSS) Must run at the same time as SubTask 1.
-# SubTask 3: Explore room 2,1. (Skills: EXPLORE) Independent of SubTask 1 and SubTask 2.
+# SubTask 3: Cross D4 to explore the room behind it. (Skills: CROSS) Independent of SubTask 1 and SubTask 2.
 # Order: SubTask 1, SubTask 2 and SubTask 3 in parallel; SubTask 1 ends only after SubTask 2 ends.
 
 # CODE
@@ -140,15 +141,15 @@ def cross_d3():
     # 1: Drive through D3.
     CROSS('D3')
 
-def explore_room_2_1():
-    # 0: SubTask 3: Explore room 2,1
-    # 1: Drive through D4 into room 2,1 and reveal it.
-    EXPLORE('2,1')
+def explore_behind_d4():
+    # 0: SubTask 3: Cross D4 to explore the room behind it
+    # 1: Drive through D4 into the unknown room and reveal it.
+    CROSS('D4')
 
 # Parallelize SubTask 1, SubTask 2 and SubTask 3
 t1 = threading.Thread(target=hold_s4)
 t2 = threading.Thread(target=cross_d3)
-t3 = threading.Thread(target=explore_room_2_1)
+t3 = threading.Thread(target=explore_behind_d4)
 t1.start()
 t2.start()
 t3.start()

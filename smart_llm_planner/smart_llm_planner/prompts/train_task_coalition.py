@@ -4,19 +4,19 @@ robots = [
     {'id': 'robot2', 'colors': ['blue'], 'status': {'type': 'ok'}, 'task': None},
 ]
 costs = {
-    'robot1': {'EXPLORE:1,2': 2.5, 'EXPLORE:2,1': 6.0},
-    'robot2': {'EXPLORE:1,2': 5.5, 'EXPLORE:2,1': 2.0},
+    'robot1': {'CROSS:D1': 2.5, 'CROSS:D2': 6.0},
+    'robot2': {'CROSS:D1': 5.5, 'CROSS:D2': 2.0},
 }
 # GENERAL TASK DECOMPOSITION
 # Independent subtasks:
-# SubTask 1: Explore room 1,2. (Skills: EXPLORE)
-# SubTask 2: Explore room 2,1. (Skills: EXPLORE)
+# SubTask 1: Cross D1 to explore the room behind it. (Skills: CROSS)
+# SubTask 2: Cross D2 to explore the room behind it. (Skills: CROSS)
 # Order: SubTask 1 and SubTask 2 in parallel. Replan when something new is found.
 
 # SOLUTION
-# All the robots have the skills needed for SubTask 1 and SubTask 2 (EXPLORE needs no color).
+# All the robots have the skills needed for SubTask 1 and SubTask 2 (CROSS needs no color).
 # SubTask 1 and SubTask 2 run in parallel, so they need two different robots.
-# robot1 is closer to room 1,2 (2.5 m vs 5.5 m). robot2 is closer to room 2,1 (2.0 m vs 6.0 m).
+# robot1 is closer to D1 (2.5 m vs 5.5 m). robot2 is closer to D2 (2.0 m vs 6.0 m).
 # For SubTask 1 assign robot1.
 # For SubTask 2 assign robot2.
 # No robot teams are needed.
@@ -56,20 +56,20 @@ costs = {
 
 # ============================================================== EXAMPLE 3 ==
 robots = [
-    {'id': 'robot1', 'colors': ['red'], 'status': {'type': 'ok'}, 'task': 'EXPLORE:1,1'},
+    {'id': 'robot1', 'colors': ['red'], 'status': {'type': 'ok'}, 'task': None},
     {'id': 'robot2', 'colors': ['blue'], 'status': {'type': 'ok'}, 'task': None},
     {'id': 'robot3', 'colors': ['green'], 'status': {'type': 'ok'}, 'task': None},
 ]
 costs = {
-    'robot1': {'HOLD:S4': 2.0, 'CROSS:D3': 3.0, 'EXPLORE:2,1': 5.0},
-    'robot2': {'HOLD:S4': 3.5, 'CROSS:D3': 2.5, 'EXPLORE:2,1': 4.0},
-    'robot3': {'HOLD:S4': 4.0, 'CROSS:D3': 6.0, 'EXPLORE:2,1': 1.5},
+    'robot1': {'HOLD:S4': 2.0, 'CROSS:D3': 3.0, 'CROSS:D4': 5.0},
+    'robot2': {'HOLD:S4': 3.5, 'CROSS:D3': 2.5, 'CROSS:D4': 4.0},
+    'robot3': {'HOLD:S4': 4.0, 'CROSS:D3': 6.0, 'CROSS:D4': 1.5},
 }
 # GENERAL TASK DECOMPOSITION
 # Independent subtasks:
 # SubTask 1: Hold red hold switch S4 to open D3. (Skills: HOLD, color red) Keep holding until SubTask 2 is done.
 # SubTask 2: Cross D3 while S4 is held. (Skills: CROSS) Must run at the same time as SubTask 1.
-# SubTask 3: Explore room 2,1. (Skills: EXPLORE) Independent of SubTask 1 and SubTask 2.
+# SubTask 3: Cross D4 to explore the room behind it. (Skills: CROSS) Independent of SubTask 1 and SubTask 2.
 # Order: SubTask 1, SubTask 2 and SubTask 3 in parallel; SubTask 1 ends only after SubTask 2 ends.
 
 # SOLUTION
@@ -79,7 +79,7 @@ costs = {
 # robot1 is busy with SubTask 1. robot2 (2.5 m) is closer to D3 than robot3 (6.0 m).
 # For SubTask 1 assign robot1.
 # For SubTask 2 assign robot2.
-# SubTask 3 needs only EXPLORE. robot3 is free and closest to room 2,1 (1.5 m).
+# SubTask 3 needs only CROSS. robot3 is free and closest to D4 (1.5 m).
 # For SubTask 3 assign robot3.
 # Team: robot1 (HOLD S4) + robot2 (CROSS D3). robot1 keeps holding until robot2 is through D3.
 
