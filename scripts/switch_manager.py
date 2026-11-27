@@ -18,6 +18,7 @@ import json
 import math
 import sys
 import time
+import traceback
 
 import yaml
 
@@ -73,7 +74,10 @@ def door_should_open(door, switch_on):
     door:      one entry of `doors`, e.g. {"id": "D1", "logic": "any_of", "requires": ["S1", "S2"], ...}
     switch_on: dict switch id -> True/False, e.g. {"S1": True, "S2": False}
     Rules: any_of = at least one required switch ON; all_of = every required switch ON.
+    A door that requires no switch at all is always open (a plain passage).
     """
+    if not door["requires"]:
+        return True
     required_states = [switch_on[sid] for sid in door["requires"]]
 
     if door["logic"] == "any_of":
@@ -112,6 +116,7 @@ def selftest():
         ("all_of: one on",             door_should_open(all_door, {"S1": True, "S2": False}), False),
         # old: ("all_of: both on",            door_should_open(all_door, {"S_R": True, "S_B": True}), True),
         ("all_of: both on",            door_should_open(all_door, {"S1": True, "S2": True}), True),
+        ("no switch needed: open",     door_should_open({"id": "D3", "logic": "any_of", "requires": []}, {}), True),
     ]
     bad = 0
     for name, got, want in cases:
@@ -134,10 +139,13 @@ def start_world_state_publisher():
     try:
         import rclpy
         from rclpy.qos import DurabilityPolicy, QoSProfile
+        from rclpy.signals import SignalHandlerOptions
         from std_msgs.msg import String
     except ImportError:
         return None
-    rclpy.init()
+    # No rclpy signal handlers: Ctrl+C / SIGTERM (from run.sh) stop this script directly,
+    # instead of invalidating the ROS context and failing the next publish.
+    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     ros_node = rclpy.create_node("switch_manager")
     qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
     pub = ros_node.create_publisher(String, WORLD_STATE_TOPIC, qos)
@@ -182,10 +190,16 @@ def run(scenario_path):
     publish_world_state = start_world_state_publisher()
     if publish_world_state is None:
         log(f"ROS 2 not sourced: world state is built but not published on {WORLD_STATE_TOPIC}")
-    world_state_on = True
+    problems = world_state.check_scenario(sc)
+    for problem in problems:
+        log(f"scenario problem: {problem}")
+    world_state_on = not problems
+    if problems:
+        log("world state off until the scenario is fixed; switches and doors keep working")
     known_rooms = set()
     last_structure = last_full = None   # structure = everything except costs
-    last_publish_time = 0.0
+    last_summary = None                 # known rooms + task ids, for the log line
+    last_publish_time = -math.inf       # time.monotonic() of the last publish
 
     while True:
         if set(poses) != set(robots):
@@ -221,10 +235,14 @@ def run(scenario_path):
             except NotImplementedError as e:
                 world_state_on = False
                 log(f"world state off: {e} is not written yet (scripts/world_state.py)")
+            except Exception:              # never let a world-state bug stop the gates
+                world_state_on = False
+                log("world state off after an error; switches and doors keep working:\n"
+                    + traceback.format_exc())
             else:
                 structure = json.dumps({k: v for k, v in state.items() if k != "costs"})
                 full = json.dumps(state)
-                now = time.time()
+                now = time.monotonic()
                 structure_changed = structure != last_structure
                 costs_changed = full != last_full and now - last_publish_time >= COSTS_ONLY_MIN_PERIOD_S
                 heartbeat_due = now - last_publish_time >= HEARTBEAT_PERIOD_S
@@ -234,8 +252,10 @@ def run(scenario_path):
                     last_full, last_publish_time = full, now
                 if structure_changed:
                     last_structure = structure
-                    log(f"world state: rooms known {sorted(known_rooms)}; "
-                        f"tasks {[t['id'] for t in state['tasks']]}")
+                summary = (sorted(known_rooms, key=world_state.id_key), [t["id"] for t in state["tasks"]])
+                if summary != last_summary:
+                    last_summary = summary
+                    log(f"world state: rooms known {summary[0]}; tasks {summary[1]}")
 
         time.sleep(1.0 / RATE_HZ)
 

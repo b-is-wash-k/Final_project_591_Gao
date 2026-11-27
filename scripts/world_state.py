@@ -20,9 +20,35 @@ Decisions used here:
 """
 import json
 import math
+import re
 import sys
 
 DEFAULT_STATUS = {"type": "ok", "repair_time": None, "waiting_for": None}
+
+
+def id_key(item_id):
+    """Sort key for ids like "S2", "D10", "1,2": numbers compare as numbers, so D2 comes before D10."""
+    return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", str(item_id))]
+
+
+def door_stays_open(door, switches):
+    """True if a known door is open now and stays open with nobody standing on a switch.
+
+    door:     a door from known_view() ({"id", "open", "open_if"})
+    switches: known_view()["switches"]
+    That is the case if no known switch controls it (open_if None: a door that needs no switch),
+    or if active LATCH switches alone satisfy its rule. A door that is open only because a robot
+    holds a switch closes as soon as the holder leaves.
+    """
+    if not door["open"]:
+        return False
+    if door["open_if"] is None:
+        return True
+    (logic, switch_ids), = door["open_if"].items()
+    latched = {s["id"] for s in switches if s["mode"] == "latch" and s["active"]}
+    if logic == "all_of":
+        return all(switch_id in latched for switch_id in switch_ids)
+    return any(switch_id in latched for switch_id in switch_ids)
 
 
 # ------------------------------------------- known view, tasks and path costs --
@@ -89,7 +115,8 @@ def known_view(sc, known_rooms, robot_xy, switch_on, door_open, robot_info):
                  "controls": first known door (by id) whose `requires` lists this switch, else None}
       doors:    known doors: {"id", "open": door_open[id],
                  "open_if": {<door logic, e.g. "any_of">: [known switch ids from `requires`]},
-                 or None while none of them is known (also for a door that needs no switch)}
+                 or None while the known switches can't open it: none known (any_of), or not
+                 all known (all_of); also None for a door that needs no switch}
     """
     all_room_ids = {room["id"] for room in sc["rooms"]}
     known_room_ids = set(known_rooms) & all_room_ids
@@ -101,7 +128,7 @@ def known_view(sc, known_rooms, robot_xy, switch_on, door_open, robot_info):
         if room_of((switch["pose"][0], switch["pose"][1]), sc["rooms"])
         in known_room_ids
     ]
-    known_switches.sort(key=lambda switch: switch["id"])
+    known_switches.sort(key=lambda switch: id_key(switch["id"]))
     known_switch_ids = {switch["id"] for switch in known_switches}
 
     exit_xy = (sc["exit"]["pose"][0], sc["exit"]["pose"][1])
@@ -114,31 +141,31 @@ def known_view(sc, known_rooms, robot_xy, switch_on, door_open, robot_info):
         for door in sc["doors"]
         if set(door["connects"]) & known_room_ids
     ]
-    known_doors.sort(key=lambda door: door["id"])
+    known_doors.sort(key=lambda door: id_key(door["id"]))
 
     room_view = []
     known_rooms_sorted = sorted(
         (room for room in sc["rooms"] if room["id"] in known_room_ids),
-        key=lambda room: room["id"],
+        key=lambda room: id_key(room["id"]),
     )
 
     for room in known_rooms_sorted:
         room_id = room["id"]
 
-        robots_here = sorted(
+        robots_here = sorted((
             robot["id"]
             for robot in sc["robots"]
             if robot["id"] in robot_xy
             and room_of(robot_xy[robot["id"]], sc["rooms"]) == room_id
-        )
+        ), key=id_key)
 
-        switches_here = sorted(
+        switches_here = sorted((
             switch["id"]
             for switch in known_switches
             if room_of(
                 (switch["pose"][0], switch["pose"][1]), sc["rooms"]
             ) == room_id
-        )
+        ), key=id_key)
 
         doors_here = []
         for door in known_doors:
@@ -168,14 +195,14 @@ def known_view(sc, known_rooms, robot_xy, switch_on, door_open, robot_info):
         })
 
     robot_view = []
-    for robot in sorted(sc["robots"], key=lambda robot: robot["id"]):
+    for robot in sorted(sc["robots"], key=lambda robot: id_key(robot["id"])):
         robot_id = robot["id"]
-        info = robot_info.get(robot_id, {})
+        info = robot_info.get(robot_id) or {}
 
         robot_view.append({
             "id": robot_id,
             "colors": robot["colors"],
-            "status": dict(info.get("status", DEFAULT_STATUS)),
+            "status": dict(info.get("status") or DEFAULT_STATUS),
             "task": info.get("task"),
         })
 
@@ -203,20 +230,25 @@ def known_view(sc, known_rooms, robot_xy, switch_on, door_open, robot_info):
 
     door_view = []
     for door in known_doors:
-        known_required_switches = sorted(
+        known_required_switches = sorted((
             switch_id
             for switch_id in door["requires"]
             if switch_id in known_switch_ids
+        ), key=id_key)
+        # None while the known switches can't open the door: none known, or (all_of) not all
+        # known. An empty or partial all_of list would read as "this is enough" to a planner
+        # or validator.
+        enough_known = bool(known_required_switches) and (
+            door["logic"] != "all_of"
+            or set(door["requires"]) <= known_switch_ids
         )
 
         door_view.append({
             "id": door["id"],
             "open": bool(door_open.get(door["id"], False)),
-            # None, not {"all_of": []}, while no controlling switch is known: an empty
-            # all_of list would read as "always open" to a planner or validator.
             "open_if": (
                 {door["logic"]: known_required_switches}
-                if known_required_switches else None
+                if enough_known else None
             ),
         })
 
@@ -238,7 +270,9 @@ def make_tasks(view):
       controls is None), "depends": None
     For each known door, by door id:
       - CROSS:<D> with "needs_color": None, "enables": None,
-        "depends": sorted ["HOLD:<S>", ...] for the door's known HOLD switches, or None if none
+        "depends": sorted ["HOLD:<S>", ...]: the known HOLD switches in its open_if, i.e. the
+        holds that can keep it open (any_of: any ONE is enough; all_of: all are needed).
+        None if there are none, or if the door already stays open without a holder.
     If the exit is known:
       - EXIT with "target": id of the room that has the exit; needs_color/enables/depends None
 
@@ -248,7 +282,7 @@ def make_tasks(view):
     tasks = []
 
     # Switch tasks come first, sorted by switch ID.
-    for switch in sorted(view["switches"], key=lambda switch: switch["id"]):
+    for switch in sorted(view["switches"], key=lambda switch: id_key(switch["id"])):
         if switch["mode"] == "latch":
             # An active latch has already been activated, so it needs no task.
             if switch["active"]:
@@ -273,20 +307,22 @@ def make_tasks(view):
         })
 
     # Then create one CROSS task for each known door.
-    for door in sorted(view["doors"], key=lambda door: door["id"]):
+    for door in sorted(view["doors"], key=lambda door: id_key(door["id"])):
         required_ids = {
             switch_id
             for switch_ids in (door["open_if"] or {}).values()
             for switch_id in switch_ids
         }
 
-        hold_switch_ids = sorted(
+        hold_switch_ids = sorted((
             switch["id"]
             for switch in view["switches"]
             if switch["mode"] == "hold"
             and switch["id"] in required_ids
-        )
+        ), key=id_key)
         depends = [f"HOLD:{switch_id}" for switch_id in hold_switch_ids]
+        if door_stays_open(door, view["switches"]):
+            depends = []   # active latches (or no switch at all) keep it open
 
         tasks.append({
             "id": f"CROSS:{door['id']}",
@@ -326,8 +362,12 @@ def path_cost(start, goal, sc, view):
     Rules:
       - Rooms are rectangles, so two points in the SAME room are joined by a straight line.
       - To change rooms, the path goes through door centers.
-      - Only KNOWN doors can be used, and only if they are OPEN, except the goal door itself
-        (CROSS:<D> only needs the robot to REACH the door, so a closed goal door is fine).
+      - A path may pass THROUGH a known door only if it stays open without a holder
+        (door_stays_open: it needs no switch, or active latches keep it open). A door that is
+        open only because a robot holds a switch closes when the holder leaves, so a robot
+        must not plan to go past it in one task: it gets there with CROSS:<D> first.
+      - The goal door itself is always fine, open or closed (CROSS:<D> only needs the robot
+        to REACH the door; the planner and validator check that it will be open).
       - A door only joins its rooms that are known.
     Hint: nodes = start, goal and the usable door centers; connect two nodes if they share a
     room; run Dijkstra (there are only a few doors, so a simple version is fine).
@@ -349,10 +389,10 @@ def path_cost(start, goal, sc, view):
 
     goal_door_id = goal.get("door")
 
-    # Add open, known doors as possible routes between rooms.
+    # Add known doors that stay open without a holder as possible routes between rooms.
     # The goal door is already represented by the goal node; it may be closed
     # because CROSS only requires reaching it.
-    for door in sorted(sc["doors"], key=lambda door: door["id"]):
+    for door in sorted(sc["doors"], key=lambda door: id_key(door["id"])):
         door_id = door["id"]
         visible_door = known_door_by_id.get(door_id)
 
@@ -360,7 +400,7 @@ def path_cost(start, goal, sc, view):
             continue
         if door_id == goal_door_id:
             continue
-        if not visible_door["open"]:
+        if not door_stays_open(visible_door, view["switches"]):
             continue
 
         connected_known_rooms = set(door["connects"]) & known_room_ids
@@ -431,7 +471,7 @@ def goal_of(task, sc, view):
 def compute_costs(view, tasks, robot_xy, sc):
     """{robot_id: {task_id: path length rounded to 0.01 m}}; unreachable tasks are left out."""
     costs = {}
-    for rid in sorted(robot_xy):
+    for rid in sorted(robot_xy, key=id_key):
         xy = robot_xy[rid]
         start = {"xy": xy, "rooms": {room_of(xy, sc["rooms"])}, "door": None}
         costs[rid] = {}
@@ -440,6 +480,34 @@ def compute_costs(view, tasks, robot_xy, sc):
             if c is not None:
                 costs[rid][t["id"]] = round(c, 2)
     return costs
+
+
+def check_scenario(sc):
+    """Problems in the scenario that would make the world state wrong; [] means fine."""
+    rooms = sc.get("rooms") or []
+    if not rooms:
+        return ["the scenario has no `rooms` (id + bounds), so nothing can be discovered"]
+    room_ids = {room["id"] for room in rooms}
+
+    def rooms_containing(pose):
+        return [r["id"] for r in rooms
+                if r["bounds"][0] <= pose[0] <= r["bounds"][2] and r["bounds"][1] <= pose[1] <= r["bounds"][3]]
+
+    problems = []
+    for door in sc.get("doors", []):
+        if "pose" not in door or "connects" not in door:
+            problems.append(f"door {door['id']} needs `pose` (its center) and `connects` (two room ids)")
+        elif len(door["connects"]) != 2 or not set(door["connects"]) <= room_ids:
+            problems.append(f"door {door['id']}: `connects` must name two rooms from `rooms`, got {door['connects']}")
+    things = [(f"switch {s['id']}", s["pose"]) for s in sc.get("switches", [])]
+    if "exit" in sc:
+        things.append(("the exit", sc["exit"]["pose"]))
+    for name, pose in things:
+        inside = rooms_containing(pose)
+        if len(inside) != 1:
+            problems.append(f"{name} at ({pose[0]}, {pose[1]}) is inside {len(inside)} rooms {inside}; "
+                            f"it must be inside exactly one")
+    return problems
 
 
 def build_world_state(sc, known_rooms, robot_xy, switch_on, door_open, robot_info=None):
@@ -507,8 +575,10 @@ EXPECTED_B = {
                  {"id": "S2", "color": "blue", "mode": "hold", "active": True, "controls": "D1"}],
     "doors": [{"id": "D1", "open": True, "open_if": {"any_of": ["S1", "S2"]}}],
     "tasks": TASKS_BOTH_ROOMS,
-    "costs": {"robot1": {"HOLD:S1": 0.0, "HOLD:S2": 3.64, "CROSS:D1": 1.82, "EXIT": 6.92},
-              "robot2": {"HOLD:S1": 3.64, "HOLD:S2": 0.0, "CROSS:D1": 1.82, "EXIT": 4.25}},
+    # D1 is open only because robots hold S1 and S2, so nobody may plan to go THROUGH it:
+    # each robot reaches the other room only with CROSS:D1 first.
+    "costs": {"robot1": {"HOLD:S1": 0.0, "CROSS:D1": 1.82},
+              "robot2": {"HOLD:S2": 0.0, "CROSS:D1": 1.82, "EXIT": 4.25}},
 }
 
 # Situation C, door closed again: both rooms known, robot1 in 1,1, robot2 in 1,2, nobody on a switch.
@@ -620,6 +690,40 @@ def selftest():
         return (expect(state["doors"], [{"id": "D1", "open": False, "open_if": None}])
                 or expect(cross["depends"], None))
     check("open_if is None while none of the door's switches is known", open_if_none_while_no_switch_known)
+
+    def all_of_needs_every_switch_known():
+        # D1 needs S1 AND S2; only S1 (room 1,1) is known: listing just S1 would look sufficient.
+        sc2 = {**sc, "doors": [{**sc["doors"][0], "logic": "all_of"}]}
+        state = build_world_state(sc2, **SITUATION_A)
+        cross = next(t for t in state["tasks"] if t["id"] == "CROSS:D1")
+        return (expect(state["doors"][0]["open_if"], None) or expect(cross["depends"], None))
+    check("all_of: open_if is None until every switch is known", all_of_needs_every_switch_known)
+
+    def latched_door_is_a_route():
+        # S1 is an active latch, so D1 stays open with nobody on a switch: robot1 can plan to the
+        # exit through it, and CROSS:D1 depends on nothing.
+        sc2 = {**sc, "switches": [{**sc["switches"][0], "mode": "latch"}, sc["switches"][1]]}
+        state = build_world_state(sc2, known_rooms={"1,1", "1,2"},
+                                  robot_xy={"robot1": (-3.0, -1.45), "robot2": (4.0, 1.0)},
+                                  switch_on={"S1": True, "S2": False}, door_open={"D1": True})
+        cross = next(t for t in state["tasks"] if t["id"] == "CROSS:D1")
+        return (expect("EXIT" in state["costs"]["robot1"], True) or expect(cross["depends"], None))
+    check("a door kept open by a latch is a route; its CROSS depends on nothing", latched_door_is_a_route)
+
+    def sorting_and_bad_status():
+        order = sorted(["D10", "D2", "D1"], key=id_key)
+        state = build_world_state(sc, **SITUATION_A, robot_info={"robot1": {"status": None, "task": None}})
+        return (expect(order, ["D1", "D2", "D10"])
+                or expect(state["robots"][0]["status"], DEFAULT_STATUS))
+    check("ids sort as numbers (D2 before D10); a null status falls back to ok", sorting_and_bad_status)
+
+    def scenario_checks():
+        broken = {**sc, "doors": [{"id": "D1", "logic": "any_of", "requires": ["S1"]}],
+                  "exit": {"id": "EXIT", "pose": [9.0, 0.0, 0.0]}}
+        problems = check_scenario(broken)
+        return expect(check_scenario(sc), []) or expect(len(problems), 2)
+    check("check_scenario: test scenario fine; missing door pose/connects and an exit outside are found",
+          scenario_checks)
 
     print("ALL PASS" if bad == 0 else f"{bad} FAILED")
     return bad == 0
