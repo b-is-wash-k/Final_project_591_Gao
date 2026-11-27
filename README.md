@@ -25,6 +25,7 @@ The robots are moved onto the switches with Gazebo's move tool. When a robot sta
   - red and blue switch pads, robot start markers and an exit marker.
 - **Scenario file:** `config/scenario.yaml`. It is the single place that defines the robots and their colors, switches (color, `hold`/`latch`, position), door rules (`any_of`/`all_of`), the exit and what the robots know at the start.
 - **Switch manager:** `scripts/switch_manager.py`. It reads the robots' true positions from Gazebo, applies the switch and door rules, and opens or closes the gate. It includes a self-test for the rules that runs without Gazebo.
+- **World state for the planners:** `scripts/world_state.py`. The switch manager uses it to publish what the team knows (rooms, robots, switches, doors, tasks and path costs) as JSON on `/team/world_state`, in the format of `docs/communication_standards.md`.
 - **One-command launcher:** `scripts/run.sh`. It starts Gazebo, spawns the robots from the scenario file and starts the switch manager.
 - **Test helpers:** `scripts/test_helpers.sh`. Ready-made test sequences, robot teleport and keyboard driving.
 
@@ -53,6 +54,7 @@ The scripts use the system Python (`/usr/bin/python3`), which has the Gazebo Pyt
 ├── scripts/
 │   ├── run.sh                 # start everything with one command
 │   ├── switch_manager.py      # switch and door logic (+ --selftest)
+│   ├── world_state.py         # world state for the planners (+ --selftest, --demo)
 │   └── test_helpers.sh        # test_a, test_b, setpose, drive_red, drive_blue
 ├── worlds/
 │   └── escape_maze.sdf        # the Gazebo world
@@ -99,12 +101,34 @@ The switch manager runs this loop 10 times per second:
 2. For each switch: which robots are on it?  Is it ON?  (on-pad radius, color, hold/latch)
 3. For each door: should it be open?                    (any_of / all_of)
 4. Send the gate position to Gazebo                     (/maze/door/D1/position: 1.3 open, 0.0 closed)
+5. Update what the team knows and publish it            (/team/world_state, JSON)
 ```
 
 - **Gazebo side:** the gate's `JointPositionController` moves the panel to the commanded height.
 - **Open height:** at 1.3 m the panel's bottom edge is far above the robot and its LiDAR.
 - **Gravity:** the gate panel has gravity turned off, so the controller reaches the commanded height exactly.
-- **Logging:** the manager prints a line whenever a switch or door changes state.
+- **Logging:** the manager prints a line whenever a switch or door changes state, and whenever the known rooms or tasks change.
+
+### World state (`/team/world_state`)
+
+The planners never see the true maze. They see only what the team has discovered:
+
+| Rule | Meaning |
+|---|---|
+| Discovery | A room becomes known when a robot enters it, and stays known. Everything inside it (switches, the exit) becomes known with it |
+| Doors | A door is known when one of its rooms is known. Until the other room is entered, its `other_room` is `"UNKNOWN"` |
+| No leaks | A switch's `controls` and a door's `open_if` list only known doors and switches |
+| Tasks | `ACTIVATE:<S>` (latch, not yet on), `HOLD:<S>`, `CROSS:<D>` for every known door, and `EXIT` once the exit is known. Exploring a new room means crossing a door that leads to `UNKNOWN` |
+| Costs | Shortest path length (m) from each robot to each task's target on the known map, through open doors only. A missing entry means the target is unreachable now |
+
+Message details:
+- **Type and format:** a `std_msgs/String` holding the JSON from `docs/communication_standards.md`, with the keys `rooms`, `robots`, `switches`, `doors`, `tasks` and `costs`.
+- **When it is sent:** at once when anything except the costs changes; at most every 0.5 s while only the costs change (robots moving); and at least every 2 s in any case.
+- **QoS:** the publisher is transient-local. A node that subscribes with `durability=TRANSIENT_LOCAL` receives the latest state as soon as it starts.
+
+```bash
+ros2 topic echo /team/world_state --once --qos-durability transient_local --field data
+```
 
 ## Quick start
 
@@ -146,6 +170,13 @@ Watch Terminal A and the gate in Gazebo while the tests run.
 
 ```bash
 python3 scripts/switch_manager.py --selftest     # ends with: ALL PASS (13 checks)
+```
+
+### World-state self-test (no Gazebo)
+
+```bash
+python3 scripts/world_state.py --selftest   # ends with: ALL PASS (12 checks: discovery, no leaks, tasks, costs)
+python3 scripts/world_state.py --demo       # prints the JSON at the start and during the handoff
 ```
 
 ### Test A: one switch, and the color check (`test_a`)
@@ -242,7 +273,8 @@ If you move a switch or the exit in the scenario, move its marker in `worlds/esc
 |---|---|
 | Gazebo hangs at startup; logs show `Waited for 10s for a subscriber to [/gazebo/starting_world]` | Use the updated `run.sh`, or run `export GZ_IP=127.0.0.1` before `gz sim`. Use the same value in terminals running robot spawners, the manager and test commands |
 | `Errno::ESRCH` / `No such process` after repeated Ctrl+C | This can happen in Gazebo's shutdown handler when a process is already gone. Press Ctrl+C once and allow shutdown to finish; check earlier log messages for the startup failure |
-| Terminal A shows nothing after `switch manager up` | Normal. It prints only when a switch or door changes; move a robot onto a switch |
+| Terminal A shows nothing after the first `world state:` line | Normal. It prints only when a switch, a door, the known rooms or the tasks change; move a robot onto a switch |
+| A planner receives no `/team/world_state` at startup | Subscribe with `durability=TRANSIENT_LOCAL` to get the latest state at once; otherwise the next one arrives within 2 s. Both ends need the same `ROS_DOMAIN_ID` |
 | `waiting for robot poses: [...]` keeps printing | The spawn `robot_name` must match the robot `id` in the scenario, and `gz_world_name` must match `<world name>` in the SDF |
 | `a Gazebo world named 'escape_maze' is already running` | Close the other Gazebo first (or `pkill -f 'gz sim'`) |
 | `ModuleNotFoundError: No module named 'gz'` | Use the system `python3` (`/usr/bin/python3`), not a conda or venv Python |
